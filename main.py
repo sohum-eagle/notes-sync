@@ -154,7 +154,7 @@ def _fmt_date(iso_str):
         return None
     try:
         dt = datetime.fromisoformat(iso_str[:19])
-        return dt.strftime(f"%b {dt.day}, %Y")
+        return dt.strftime("%-m/%-d/%y")
     except Exception:
         return iso_str
 
