@@ -60,7 +60,7 @@ def _external_domain(payload):
 
 
 def _get_or_create_company(domain):
-    r = httpx.post(
+    r = httpx.post(timeout=30,
         "https://api.attio.com/v2/objects/companies/records/query",
         headers=ATTIO,
         json={"filter": {"domains": {"domain": {"$eq": domain}}}, "limit": 1},
@@ -69,7 +69,7 @@ def _get_or_create_company(domain):
     if rows:
         return rows[0]["id"]["record_id"]
 
-    r = httpx.post(
+    r = httpx.post(timeout=30,
         "https://api.attio.com/v2/objects/companies/records",
         headers=ATTIO,
         json={"data": {"values": {
@@ -100,7 +100,7 @@ def _post_note(company_id, title, summary, url, source="Fathom"):
 
 
 def _attio_note_exists(company_id, title):
-    r = httpx.get(
+    r = httpx.get(timeout=30,
         "https://api.attio.com/v2/notes",
         headers=ATTIO,
         params={"parent_object": "companies", "parent_record_id": company_id, "limit": 500},
@@ -139,7 +139,7 @@ def _interaction_endpoint(slug):
     company_id = _find_company(domain)
     if not company_id:
         return jsonify(date=None)
-    r = httpx.get(
+    r = httpx.get(timeout=30,
         f"https://api.attio.com/v2/objects/companies/records/{company_id}",
         headers=ATTIO,
     )
@@ -160,7 +160,7 @@ def _fmt_date(iso_str):
 
 
 def _find_company(domain):
-    r = httpx.post(
+    r = httpx.post(timeout=30,
         "https://api.attio.com/v2/objects/companies/records/query",
         headers=ATTIO,
         json={"filter": {"domains": {"domain": {"$eq": domain}}}, "limit": 1},
@@ -172,7 +172,7 @@ def _find_company(domain):
 def _get_all_notes(company_id):
     notes, offset = [], 0
     while True:
-        r = httpx.get(
+        r = httpx.get(timeout=30,
             "https://api.attio.com/v2/notes",
             headers=ATTIO,
             params={"parent_object": "companies", "parent_record_id": company_id,
