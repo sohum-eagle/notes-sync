@@ -139,15 +139,13 @@ def _interaction_endpoint(slug):
     if not company_id:
         return jsonify(date=None)
     r = httpx.get(
-        f"https://api.attio.com/v2/objects/companies/records/{company_id}/attributes/{slug}/values",
+        f"https://api.attio.com/v2/objects/companies/records/{company_id}",
         headers=ATTIO,
     )
-    data = r.json().get("data", [])
-    if not data:
+    entries = r.json().get("data", {}).get("values", {}).get(slug, [])
+    if not entries:
         return jsonify(date=None)
-    val = data[0].get("value", {})
-    date = val.get("interacted_at") or val.get("created_at")
-    return jsonify(date=date)
+    return jsonify(date=entries[0].get("interacted_at"))
 
 
 def _find_company(domain):
