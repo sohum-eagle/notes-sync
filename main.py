@@ -33,16 +33,22 @@ def last_webhook():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    if WEBHOOK_SECRET:
-        sig      = request.headers.get("x-fathom-signature", "")
-        expected = hmac.new(WEBHOOK_SECRET.encode(), request.data, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(sig, expected):
-            abort(401)
-
+    # Capture raw data and payload BEFORE any auth check so /last-webhook always shows what arrived
+    raw_body = request.data
     payload = request.json or {}
     global _last_webhook
     _last_webhook = payload
-    print(f"WEBHOOK RECEIVED: keys={list(payload.keys())} invitees={payload.get('calendar_invitees', [])}", flush=True)
+    all_headers = dict(request.headers)
+    print(f"WEBHOOK HIT: title={payload.get('meeting_title')} sig_header={request.headers.get('x-fathom-signature','NONE')}", flush=True)
+
+    if WEBHOOK_SECRET:
+        sig = request.headers.get("x-fathom-signature", "")
+        # Handle both raw hex and "sha256=<hex>" formats
+        sig_value = sig.replace("sha256=", "").replace("v1=", "")
+        expected = hmac.new(WEBHOOK_SECRET.encode(), raw_body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig_value, expected):
+            print(f"WEBHOOK HMAC FAILED: got={sig_value[:20]}... expected={expected[:20]}...", flush=True)
+            abort(401)
     title   = payload.get("meeting_title", "Meeting")
     summary = (payload.get("default_summary") or {}).get("markdown_formatted", "").strip()
     url     = payload.get("url") or payload.get("share_url", "")
