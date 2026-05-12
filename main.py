@@ -1,23 +1,7 @@
 import os, hmac, hashlib, httpx, anthropic
 from flask import Flask, request, jsonify, abort
-from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
-
-
-def _run_granola_sync():
-    if not os.environ.get("GRANOLA_API_KEY"):
-        return
-    try:
-        from granola_sync import sync
-        sync()
-    except Exception as e:
-        print(f"Granola sync error: {e}")
-
-
-scheduler = BackgroundScheduler(daemon=True)
-scheduler.add_job(_run_granola_sync, "interval", minutes=15)
-scheduler.start()
 
 ATTIO_KEY      = os.environ["ATTIO_API_KEY"]
 MY_DOMAIN      = os.environ.get("MY_DOMAIN", "eagleeng.com")
