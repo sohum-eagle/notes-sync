@@ -11,7 +11,7 @@ LOOKBACK    = int(os.environ.get("GRANOLA_LOOKBACK_MINUTES", "20"))
 def sync(created_after=None):
     """Sync Granola notes to Attio. created_after is an ISO datetime string."""
     if created_after is None:
-        created_after = (datetime.now(timezone.utc) - timedelta(minutes=LOOKBACK)).isoformat()
+        created_after = (datetime.now(timezone.utc) - timedelta(minutes=LOOKBACK)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     cursor = None
     done = skipped = 0
