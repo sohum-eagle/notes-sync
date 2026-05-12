@@ -210,42 +210,6 @@ def _summarize(notes):
     return resp.content[0].text
 
 
-@app.route("/latest-email-subject")
-def latest_email_subject():
-    domain = request.args.get("domain", "").strip().lower()
-    if not domain:
-        return jsonify(subject=None)
-    company_id = _find_company(domain)
-    if not company_id:
-        return jsonify(subject=None)
-    r = httpx.get(
-        "https://api.attio.com/v2/notes",
-        headers=ATTIO,
-        params={"parent_object": "email_threads", "limit": 1},
-    )
-    # Attio email threads live under a different object — try entries
-    r2 = httpx.post(
-        "https://api.attio.com/v2/objects/email_threads/records/query",
-        headers=ATTIO,
-        json={"filter": {"associated_record_id": company_id}, "limit": 1,
-              "sorts": [{"attribute": "last_message_at", "direction": "desc"}]},
-    )
-    return jsonify(raw=r2.json())
-
-
-@app.route("/debug-attio")
-def debug_attio():
-    domain = request.args.get("domain", "").strip().lower()
-    if not domain:
-        return jsonify(error="pass ?domain=")
-    company_id = _find_company(domain)
-    if not company_id:
-        return jsonify(error="company not found")
-    r = httpx.get(
-        f"https://api.attio.com/v2/objects/companies/records/{company_id}",
-        headers=ATTIO,
-    )
-    return jsonify(r.json())
 
 
 @app.route("/granola-sync", methods=["POST"])
