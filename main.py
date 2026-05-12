@@ -11,6 +11,7 @@ except Exception as _e:
     sys.exit(1)
 
 app = Flask(__name__)
+_last_webhook = {}  # stores last received payload for debugging
 
 ATTIO_KEY      = os.environ.get("ATTIO_API_KEY", "")
 MY_DOMAIN      = os.environ.get("MY_DOMAIN", "eagleeng.com")
@@ -25,6 +26,11 @@ def ping():
     return "pong"
 
 
+@app.route("/last-webhook")
+def last_webhook():
+    return jsonify(_last_webhook)
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     if WEBHOOK_SECRET:
@@ -34,6 +40,9 @@ def webhook():
             abort(401)
 
     payload = request.json or {}
+    global _last_webhook
+    _last_webhook = payload
+    print(f"WEBHOOK RECEIVED: keys={list(payload.keys())} invitees={payload.get('calendar_invitees', [])}", flush=True)
     title   = payload.get("meeting_title", "Meeting")
     summary = (payload.get("default_summary") or {}).get("markdown_formatted", "").strip()
     url     = payload.get("url") or payload.get("share_url", "")
@@ -54,7 +63,11 @@ def webhook():
 def _external_domain(payload):
     for inv in payload.get("calendar_invitees", []):
         d = inv.get("email_domain", "")
-        if inv.get("is_external") and MY_DOMAIN not in d:
+        if not d:
+            email = inv.get("email", "")
+            if "@" in email:
+                d = email.split("@")[1]
+        if d and MY_DOMAIN not in d.lower():
             return d.lower()
     return None
 
