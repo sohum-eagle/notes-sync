@@ -2,7 +2,7 @@ import os, hmac, hashlib, sys
 print("notes-sync starting up...", flush=True)
 
 try:
-    import httpx, anthropic
+    import httpx
     from flask import Flask, request, jsonify, abort
     print("imports OK", flush=True)
 except Exception as _e:
@@ -178,6 +178,7 @@ def _get_all_notes(company_id):
 
 
 def _summarize(notes):
+    import anthropic
     text = "\n\n---\n\n".join(
         f"Title: {n.get('title','')}\n{n.get('content_plaintext') or ''}"
         for n in notes
