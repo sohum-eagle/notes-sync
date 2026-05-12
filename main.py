@@ -201,6 +201,21 @@ def _summarize(notes):
     return resp.content[0].text
 
 
+@app.route("/debug-attio")
+def debug_attio():
+    domain = request.args.get("domain", "").strip().lower()
+    if not domain:
+        return jsonify(error="pass ?domain=")
+    company_id = _find_company(domain)
+    if not company_id:
+        return jsonify(error="company not found")
+    r = httpx.get(
+        f"https://api.attio.com/v2/objects/companies/records/{company_id}",
+        headers=ATTIO,
+    )
+    return jsonify(r.json())
+
+
 @app.route("/granola-sync", methods=["POST"])
 def granola_sync_route():
     from granola_sync import sync
