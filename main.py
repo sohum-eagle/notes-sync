@@ -56,6 +56,10 @@ def webhook():
         return jsonify(ok=True)
 
     company_id = _get_or_create_company(domain)
+    attio_title = f"Fathom: {title}"
+    if _attio_note_exists(company_id, attio_title):
+        print(f"skip (already in Attio): {title}")
+        return jsonify(ok=True)
     _post_note(company_id, title, summary, url)
     return jsonify(ok=True)
 
