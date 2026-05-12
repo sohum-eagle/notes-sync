@@ -2,3 +2,4 @@ flask
 httpx
 gunicorn
 apscheduler
+anthropic
