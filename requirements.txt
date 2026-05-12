@@ -1,4 +1,4 @@
 flask
-httpx
+httpx>=0.23.0,<0.28.0
 gunicorn
 anthropic

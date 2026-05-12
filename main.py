@@ -1,12 +1,27 @@
-import os, hmac, hashlib, httpx, anthropic
-from flask import Flask, request, jsonify, abort
+import os, hmac, hashlib, sys
+print("notes-sync starting up...", flush=True)
+
+try:
+    import httpx, anthropic
+    from flask import Flask, request, jsonify, abort
+    print("imports OK", flush=True)
+except Exception as _e:
+    print(f"IMPORT ERROR: {_e}", flush=True)
+    sys.exit(1)
 
 app = Flask(__name__)
 
-ATTIO_KEY      = os.environ["ATTIO_API_KEY"]
+ATTIO_KEY      = os.environ.get("ATTIO_API_KEY", "")
 MY_DOMAIN      = os.environ.get("MY_DOMAIN", "eagleeng.com")
 WEBHOOK_SECRET = os.environ.get("FATHOM_WEBHOOK_SECRET", "")
 ATTIO          = {"Authorization": f"Bearer {ATTIO_KEY}", "Content-Type": "application/json"}
+
+print(f"env OK — ATTIO_KEY={'set' if ATTIO_KEY else 'MISSING'}, MY_DOMAIN={MY_DOMAIN}", flush=True)
+
+
+@app.route("/ping")
+def ping():
+    return "pong"
 
 
 @app.route("/webhook", methods=["POST"])
@@ -169,7 +184,7 @@ def _summarize(notes):
     ).strip()
     if not text:
         return "No notes"
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
     resp = client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=300,
