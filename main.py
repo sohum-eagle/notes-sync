@@ -43,12 +43,12 @@ def webhook():
 
     if WEBHOOK_SECRET:
         sig = request.headers.get("x-fathom-signature", "")
-        # Handle both raw hex and "sha256=<hex>" formats
-        sig_value = sig.replace("sha256=", "").replace("v1=", "")
-        expected = hmac.new(WEBHOOK_SECRET.encode(), raw_body, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(sig_value, expected):
-            print(f"WEBHOOK HMAC FAILED: got={sig_value[:20]}... expected={expected[:20]}...", flush=True)
-            abort(401)
+        if sig:
+            sig_value = sig.replace("sha256=", "").replace("v1=", "")
+            expected = hmac.new(WEBHOOK_SECRET.encode(), raw_body, hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(sig_value, expected):
+                print(f"WEBHOOK HMAC FAILED: got={sig_value[:20]}... expected={expected[:20]}...", flush=True)
+                abort(401)
     title   = payload.get("meeting_title", "Meeting")
     summary = (payload.get("default_summary") or {}).get("markdown_formatted", "").strip()
     url     = payload.get("url") or payload.get("share_url", "")
