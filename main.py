@@ -1,5 +1,18 @@
-import os, hmac, hashlib, sys
+import os, hmac, hashlib, sys, time
 from datetime import datetime
+
+# Simple TTL cache: key -> (value, expiry_timestamp)
+_cache = {}
+CACHE_TTL = 300  # 5 minutes
+
+def _cache_get(key):
+    entry = _cache.get(key)
+    if entry and time.time() < entry[1]:
+        return entry[0]
+    return None
+
+def _cache_set(key, value):
+    _cache[key] = (value, time.time() + CACHE_TTL)
 print("notes-sync starting up...", flush=True)
 
 try:
@@ -163,6 +176,12 @@ def _interaction_endpoint(slug):
     domain = request.args.get("domain", "").strip().lower()
     if not domain:
         return jsonify(date=None)
+
+    cache_key = f"{slug}:{domain}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return jsonify(date=cached)
+
     company_id = _find_company(domain)
     if not company_id:
         return jsonify(date=None)
@@ -172,9 +191,9 @@ def _interaction_endpoint(slug):
         timeout=30,
     )
     entries = r.json().get("data", {}).get("values", {}).get(slug, [])
-    if not entries:
-        return jsonify(date=None)
-    return jsonify(date=_fmt_date(entries[0].get("interacted_at")))
+    result = _fmt_date(entries[0].get("interacted_at")) if entries else None
+    _cache_set(cache_key, result)
+    return jsonify(date=result)
 
 
 def _fmt_date(iso_str):
@@ -188,6 +207,9 @@ def _fmt_date(iso_str):
 
 
 def _find_company(domain):
+    cached = _cache_get(f"company:{domain}")
+    if cached is not None:
+        return cached
     r = httpx.post(
         "https://api.attio.com/v2/objects/companies/records/query",
         headers=ATTIO,
@@ -195,7 +217,9 @@ def _find_company(domain):
         timeout=30,
     )
     rows = r.json().get("data", [])
-    return rows[0]["id"]["record_id"] if rows else None
+    result = rows[0]["id"]["record_id"] if rows else ""
+    _cache_set(f"company:{domain}", result)
+    return result or None
 
 
 def _get_all_notes(company_id):
