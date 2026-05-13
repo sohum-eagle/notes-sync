@@ -242,10 +242,13 @@ def _get_all_notes(company_id):
 
 def _summarize(notes):
     import anthropic
-    text = "\n\n---\n\n".join(
-        f"Title: {n.get('title','')}\n{n.get('content_plaintext') or ''}"
-        for n in notes
-    ).strip()
+    # Only include notes that have actual content, not just a title
+    chunks = []
+    for n in notes:
+        content = (n.get("content_plaintext") or n.get("content_markdown") or "").strip()
+        if content:
+            chunks.append(f"Title: {n.get('title','')}\n{content}")
+    text = "\n\n---\n\n".join(chunks).strip()
     if not text:
         return "No notes"
     client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
@@ -261,7 +264,12 @@ def _summarize(notes):
             f"Notes:\n{text[:8000]}"
         )}],
     )
-    return resp.content[0].text
+    result = resp.content[0].text.strip()
+    # If Claude couldn't find real content, return clean fallback
+    no_content_phrases = ["don't have", "no meeting notes", "please provide", "no notes to", "unable to"]
+    if any(p in result.lower() for p in no_content_phrases):
+        return "No notes"
+    return result
 
 
 
