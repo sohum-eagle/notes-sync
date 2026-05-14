@@ -1,5 +1,6 @@
-import os, hmac, hashlib, sys, time
+import os, hmac, hashlib, sys, time, smtplib
 from datetime import datetime
+from email.mime.text import MIMEText
 
 # Simple TTL cache: key -> (value, expiry_timestamp)
 _cache = {}
@@ -30,8 +31,30 @@ ATTIO_KEY      = os.environ.get("ATTIO_API_KEY", "")
 MY_DOMAIN      = os.environ.get("MY_DOMAIN", "eagleeng.com")
 WEBHOOK_SECRET = os.environ.get("FATHOM_WEBHOOK_SECRET", "")
 ATTIO          = {"Authorization": f"Bearer {ATTIO_KEY}", "Content-Type": "application/json"}
+GMAIL_PASS     = os.environ.get("GMAIL_APP_PASSWORD", "")
+NOTIFY_EMAIL   = "sohum@eagleeng.com"
 
 print(f"env OK — ATTIO_KEY={'set' if ATTIO_KEY else 'MISSING'}", flush=True)
+
+
+def _send_notification(title, domain, source, url=""):
+    if not GMAIL_PASS:
+        return
+    try:
+        body = f"New {source} note synced to Attio\n\nMeeting: {title}\nCompany: {domain}"
+        if url:
+            body += f"\nLink: {url}"
+        msg = MIMEText(body)
+        msg["Subject"] = f"Note synced: {title}"
+        msg["From"]    = NOTIFY_EMAIL
+        msg["To"]      = NOTIFY_EMAIL
+        with smtplib.SMTP("smtp.gmail.com", 587) as s:
+            s.starttls()
+            s.login(NOTIFY_EMAIL, GMAIL_PASS.replace(" ", ""))
+            s.send_message(msg)
+        print(f"Notification sent for: {title}", flush=True)
+    except Exception as e:
+        print(f"Email notification failed: {e}", flush=True)
 
 
 @app.route("/ping")
@@ -136,6 +159,7 @@ def _post_note(company_id, title, summary, url, source="Fathom"):
         timeout=30,
     )
     print(f"{source} note created on {company_id}: {title}".encode('ascii', 'replace').decode('ascii'))
+    _send_notification(title, company_id, source, url)
 
 
 def _attio_note_exists(company_id, title):
