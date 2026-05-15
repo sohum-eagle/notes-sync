@@ -1,4 +1,4 @@
-import os, hmac, hashlib, sys, time, smtplib
+import os, hmac, hashlib, sys, time, smtplib, threading
 from datetime import datetime
 from email.mime.text import MIMEText
 
@@ -38,6 +38,7 @@ print(f"env OK — ATTIO_KEY={'set' if ATTIO_KEY else 'MISSING'}", flush=True)
 
 
 def _send_notification(title, domain, source, url=""):
+    """Fire-and-forget email — always called in a daemon thread, never blocks response."""
     if not GMAIL_PASS:
         return
     try:
@@ -48,8 +49,8 @@ def _send_notification(title, domain, source, url=""):
         msg["Subject"] = f"Note synced: {title}"
         msg["From"]    = NOTIFY_EMAIL
         msg["To"]      = NOTIFY_EMAIL
-        with smtplib.SMTP("smtp.gmail.com", 587) as s:
-            s.starttls()
+        # Port 465 (SMTP_SSL) — Railway blocks 587/STARTTLS but allows 465
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
             s.login(NOTIFY_EMAIL, GMAIL_PASS.replace(" ", ""))
             s.send_message(msg)
         print(f"Notification sent for: {title}", flush=True)
@@ -159,7 +160,7 @@ def _post_note(company_id, title, summary, url, source="Fathom"):
         timeout=30,
     )
     print(f"{source} note created on {company_id}: {title}".encode('ascii', 'replace').decode('ascii'))
-    _send_notification(title, company_id, source, url)
+    threading.Thread(target=_send_notification, args=(title, company_id, source, url), daemon=True).start()
 
 
 def _attio_note_exists(company_id, title):
