@@ -1,10 +1,14 @@
-import os, hmac, hashlib, sys, time, smtplib, threading
+import os, hmac, hashlib, sys, time, threading
 from datetime import datetime
-from email.mime.text import MIMEText
 
 # Simple TTL cache: key -> (value, expiry_timestamp)
 _cache = {}
 CACHE_TTL = 300  # 5 minutes
+
+# In-memory dedup: (company_id, title) -> posted_at timestamp
+# Guards against Attio's ~90s consistency lag during Fathom retries
+_posted_notes = {}
+DEDUP_TTL = 600  # 10 minutes
 
 def _cache_get(key):
     entry = _cache.get(key)
@@ -31,29 +35,32 @@ ATTIO_KEY      = os.environ.get("ATTIO_API_KEY", "")
 MY_DOMAIN      = os.environ.get("MY_DOMAIN", "eagleeng.com")
 WEBHOOK_SECRET = os.environ.get("FATHOM_WEBHOOK_SECRET", "")
 ATTIO          = {"Authorization": f"Bearer {ATTIO_KEY}", "Content-Type": "application/json"}
-GMAIL_PASS     = os.environ.get("GMAIL_APP_PASSWORD", "")
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 NOTIFY_EMAIL   = "sohum@eagleeng.com"
 
 print(f"env OK — ATTIO_KEY={'set' if ATTIO_KEY else 'MISSING'}", flush=True)
 
 
 def _send_notification(title, domain, source, url=""):
-    """Fire-and-forget email — always called in a daemon thread, never blocks response."""
-    if not GMAIL_PASS:
+    """Fire-and-forget email via Resend HTTP API — called in a daemon thread."""
+    if not RESEND_API_KEY:
         return
     try:
         body = f"New {source} note synced to Attio\n\nMeeting: {title}\nCompany: {domain}"
         if url:
             body += f"\nLink: {url}"
-        msg = MIMEText(body)
-        msg["Subject"] = f"Note synced: {title}"
-        msg["From"]    = NOTIFY_EMAIL
-        msg["To"]      = NOTIFY_EMAIL
-        # Port 465 (SMTP_SSL) — Railway blocks 587/STARTTLS but allows 465
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
-            s.login(NOTIFY_EMAIL, GMAIL_PASS.replace(" ", ""))
-            s.send_message(msg)
-        print(f"Notification sent for: {title}", flush=True)
+        r = httpx.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "from":    "Notes Sync <onboarding@resend.dev>",
+                "to":      [NOTIFY_EMAIL],
+                "subject": f"Note synced: {title}",
+                "text":    body,
+            },
+            timeout=15,
+        )
+        print(f"Notification sent ({r.status_code}) for: {title}", flush=True)
     except Exception as e:
         print(f"Email notification failed: {e}", flush=True)
 
@@ -100,9 +107,15 @@ def webhook():
 
     company_id = _get_or_create_company(domain)
     attio_title = f"Fathom: {title}"
+    # Check in-memory cache first (guards against Attio's ~90s consistency lag)
+    dedup_key = (company_id, attio_title)
+    if _posted_notes.get(dedup_key, 0) > time.time() - DEDUP_TTL:
+        print(f"skip (in-memory dedup): {title}", flush=True)
+        return jsonify(ok=True)
     if _attio_note_exists(company_id, attio_title):
         print(f"skip (already in Attio): {title}")
         return jsonify(ok=True)
+    _posted_notes[dedup_key] = time.time()
     _post_note(company_id, title, summary, url)
     return jsonify(ok=True)
 
