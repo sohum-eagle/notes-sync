@@ -5,10 +5,31 @@ from datetime import datetime
 _cache = {}
 CACHE_TTL = 300  # 5 minutes
 
-# In-memory dedup: (company_id, title) -> posted_at timestamp
-# Guards against Attio's ~90s consistency lag during Fathom retries
-_posted_notes = {}
-DEDUP_TTL = 600  # 10 minutes
+DEDUP_TTL = 600  # 10 minutes — window to suppress duplicate webhooks
+
+
+def _claim_note(company_id, title):
+    """
+    Cross-process dedup using atomic file creation.
+    Returns True if this worker should proceed with posting.
+    Returns False if another worker already claimed this note within DEDUP_TTL.
+    Uses open(..., 'x') which is atomic on Linux — only one process wins.
+    """
+    key = hashlib.md5(f"{company_id}:{title}".encode()).hexdigest()
+    path = f"/tmp/note_dedup_{key}"
+    try:
+        mtime = os.path.getmtime(path)
+        if time.time() - mtime < DEDUP_TTL:
+            return False  # claimed recently by another worker
+        os.remove(path)   # expired — remove so we can reclaim
+    except FileNotFoundError:
+        pass
+    try:
+        with open(path, "x") as f:
+            f.write(str(time.time()))
+        return True   # claimed by this worker
+    except FileExistsError:
+        return False  # another worker beat us to it (race condition)
 
 def _cache_get(key):
     entry = _cache.get(key)
@@ -107,15 +128,13 @@ def webhook():
 
     company_id = _get_or_create_company(domain)
     attio_title = f"Fathom: {title}"
-    # Check in-memory cache first (guards against Attio's ~90s consistency lag)
-    dedup_key = (company_id, attio_title)
-    if _posted_notes.get(dedup_key, 0) > time.time() - DEDUP_TTL:
-        print(f"skip (in-memory dedup): {title}", flush=True)
+    # Cross-process dedup: atomic file claim beats Attio's ~90s consistency lag
+    if not _claim_note(company_id, attio_title):
+        print(f"skip (cross-process dedup): {title}", flush=True)
         return jsonify(ok=True)
     if _attio_note_exists(company_id, attio_title):
         print(f"skip (already in Attio): {title}")
         return jsonify(ok=True)
-    _posted_notes[dedup_key] = time.time()
     _post_note(company_id, title, summary, url)
     return jsonify(ok=True)
 
