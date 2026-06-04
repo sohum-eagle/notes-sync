@@ -341,5 +341,39 @@ def granola_sync_route():
     return jsonify(done=done, skipped=skipped)
 
 
+# ── In-app Granola sync scheduler ───────────────────────────────────────────
+# Replaces the external Railway cron service, which could not be reliably
+# re-armed via the API (deployments stuck at SUCCESS, never SLEEPING).
+# Every gunicorn worker starts this thread, but an atomic per-cycle claim file
+# (plus the per-note dedup lock) guarantees exactly one sync per interval with
+# no duplicate notes — even across all 4 workers.
+GRANOLA_SYNC_INTERVAL = int(os.environ.get("GRANOLA_SYNC_INTERVAL", "900"))  # 15 min
+
+def _granola_scheduler():
+    time.sleep(30)  # let all workers finish booting before the first run
+    while True:
+        try:
+            cycle_id = int(time.time() // GRANOLA_SYNC_INTERVAL)
+            claim = f"/tmp/granola_cycle_{cycle_id}"
+            try:
+                fd = os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
+            except FileExistsError:
+                pass  # another worker already owns this cycle
+            else:
+                from granola_sync import sync
+                done, skipped = sync()
+                print(f"[scheduler] cycle {cycle_id}: {done} created, {skipped} skipped", flush=True)
+        except Exception as e:
+            print(f"[scheduler] error: {e}", flush=True)
+        time.sleep(60)  # re-check each minute; cycle_id ensures one run per window
+
+# Only run under Railway (or when explicitly enabled) so local script runs and
+# tests don't spawn it.
+if os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("ENABLE_SCHEDULER"):
+    threading.Thread(target=_granola_scheduler, daemon=True).start()
+    print("Granola in-app scheduler started", flush=True)
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
