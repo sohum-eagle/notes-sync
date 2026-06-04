@@ -1,6 +1,10 @@
 import os, httpx
 from datetime import datetime, timedelta, timezone
-from main import _get_or_create_company, _post_note, _attio_note_exists, MY_DOMAIN
+from main import _get_or_create_company, _post_note, _attio_note_exists, _claim_note, MY_DOMAIN
+
+# Lock TTL must exceed the lookback window so a note caught by two
+# consecutive cron runs (interval 15 min, lookback 20 min) is posted once.
+DEDUP_LOCK_TTL = 1800  # 30 minutes
 
 GRANOLA_KEY = os.environ["GRANOLA_API_KEY"]
 GRANOLA     = {"Authorization": f"Bearer {GRANOLA_KEY}"}
@@ -66,6 +70,12 @@ def _process_note(client, note):
     company_id = _get_or_create_company(domain)
 
     attio_title = f"Granola: {title}"
+    # Cross-process/-run lock first (catches Attio's list-consistency lag),
+    # then the Attio existence check as a backstop (survives redeploys that
+    # clear the lock dir).
+    if not _claim_note(company_id, attio_title, ttl=DEDUP_LOCK_TTL):
+        print(f"  skip (dedup lock): {title}")
+        return 0, 1
     if _attio_note_exists(company_id, attio_title):
         print(f"  skip (already synced): {title}")
         return 0, 1

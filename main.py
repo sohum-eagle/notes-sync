@@ -8,19 +8,22 @@ CACHE_TTL = 300  # 5 minutes
 DEDUP_TTL = 600  # 10 minutes — window to suppress duplicate webhooks
 
 
-def _claim_note(company_id, title):
+def _claim_note(company_id, title, ttl=DEDUP_TTL):
     """
     Cross-process dedup using atomic file creation.
     Returns True if this worker should proceed with posting.
-    Returns False if another worker already claimed this note within DEDUP_TTL.
+    Returns False if this note was claimed within `ttl` seconds.
     Uses open(..., 'x') which is atomic on Linux — only one process wins.
+    Fathom webhooks use the default 10-min TTL (retries fire ~60s apart);
+    Granola cron passes a longer TTL than its lookback window so the same
+    note seen by two consecutive cron runs is only posted once.
     """
     key = hashlib.md5(f"{company_id}:{title}".encode()).hexdigest()
     path = f"/tmp/note_dedup_{key}"
     try:
         mtime = os.path.getmtime(path)
-        if time.time() - mtime < DEDUP_TTL:
-            return False  # claimed recently by another worker
+        if time.time() - mtime < ttl:
+            return False  # claimed recently
         os.remove(path)   # expired — remove so we can reclaim
     except FileNotFoundError:
         pass
