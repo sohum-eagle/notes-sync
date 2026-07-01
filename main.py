@@ -204,6 +204,8 @@ def _external_attendees(invitees):
             continue
         seen.add(email)
         name = (inv.get("name") or inv.get("display_name") or inv.get("full_name") or "").strip()
+        if "@" in name:  # some sources stuff the email into the name field
+            name = ""
         out.append({"email": email, "name": name or _name_from_email(email)})
     return out
 
