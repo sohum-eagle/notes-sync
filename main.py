@@ -62,6 +62,16 @@ ATTIO          = {"Authorization": f"Bearer {ATTIO_KEY}", "Content-Type": "appli
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 NOTIFY_EMAIL   = "sohum@eagleeng.com"
 
+# Personal / free email providers — never create a "company" from these domains
+# (that's the bug that dumped 63 notes onto a junk "Google" @ gmail.com record).
+FREE_EMAIL_DOMAINS = {
+    "gmail.com", "googlemail.com", "outlook.com", "outlook.co.uk", "hotmail.com",
+    "hotmail.co.uk", "live.com", "msn.com", "yahoo.com", "yahoo.co.uk", "ymail.com",
+    "icloud.com", "me.com", "mac.com", "aol.com", "proton.me", "protonmail.com",
+    "pm.me", "gmx.com", "gmx.net", "zoho.com", "hey.com", "fastmail.com",
+    "yandex.com", "mail.com", "qq.com", "163.com",
+}
+
 print(f"env OK — ATTIO_KEY={'set' if ATTIO_KEY else 'MISSING'}", flush=True)
 
 
@@ -130,26 +140,40 @@ def webhook():
     return jsonify(ok=True, posted=len(posted))
 
 
+def _post_target(parent_object, parent_id, attio_title, title, summary, url, source, dedup_ttl):
+    """Post the note to one parent (person or company) with dedup. Returns True if posted."""
+    if not parent_id:
+        return False
+    # Cross-process dedup: atomic file claim beats Attio's list-consistency lag
+    if not _claim_note(f"{parent_object}:{parent_id}", attio_title, ttl=dedup_ttl):
+        return False
+    if _attio_note_exists(parent_object, parent_id, attio_title):
+        return False
+    _post_note(parent_object, parent_id, title, summary, url, source=source)
+    return True
+
+
 def _sync_note_to_people(invitees, title, summary, url, source, dedup_ttl=DEDUP_TTL):
-    """Attach the meeting note to each external attendee's Attio Person record.
-    Returns the list of person display-names the note was posted to. One email
-    notification is sent per meeting (not per person)."""
+    """Attach the meeting note to BOTH each external attendee's Attio Person record
+    AND their company (for real corporate domains — never free-email providers).
+    Returns the list of person display-names posted to. One email per meeting."""
     attendees = _external_attendees(invitees)
     attio_title = f"{source}: {title}"
     posted = []
+    companies_done = set()
     for att in attendees:
-        person_id = _find_or_create_person(att["email"], att["name"])
-        if not person_id:
-            continue
-        # Cross-process dedup: atomic file claim beats Attio's list-consistency lag
-        if not _claim_note(person_id, attio_title, ttl=dedup_ttl):
-            print(f"skip (dedup lock) {att['email']}: {title}", flush=True)
-            continue
-        if _attio_note_exists("people", person_id, attio_title):
-            print(f"skip (already on person) {att['email']}: {title}", flush=True)
-            continue
-        _post_note("people", person_id, title, summary, url, source=source)
-        posted.append(att["name"])
+        email  = att["email"]
+        domain = email.split("@")[1]
+        # 1) Person — always
+        if _post_target("people", _find_or_create_person(email, att["name"]),
+                        attio_title, title, summary, url, source, dedup_ttl):
+            posted.append(att["name"])
+        # 2) Company — only for real corporate domains (skip gmail/outlook/etc.)
+        if domain not in FREE_EMAIL_DOMAINS:
+            cid = _get_or_create_company(domain)
+            if cid and cid not in companies_done:
+                companies_done.add(cid)
+                _post_target("companies", cid, attio_title, title, summary, url, source, dedup_ttl)
     if posted:
         threading.Thread(target=_send_notification,
                          args=(title, ", ".join(posted), source, url), daemon=True).start()
