@@ -1,6 +1,6 @@
 import os, httpx
 from datetime import datetime, timedelta, timezone
-from main import _get_or_create_company, _post_note, _attio_note_exists, _claim_note, MY_DOMAIN
+from main import _sync_note_to_people, MY_DOMAIN
 
 # Lock TTL must exceed the lookback window so a note caught by two
 # consecutive cron runs (interval 15 min, lookback 20 min) is posted once.
@@ -62,36 +62,14 @@ def _process_note(client, note):
         return 0, 1
 
     attendees = full.get("attendees") or note.get("attendees") or []
-    domain = _external_domain(attendees)
-    if not domain:
-        print(f"  skip (no external domain): {title}")
+    # Attach to each external attendee's Attio Person record (find-or-create).
+    # 30-min dedup lock so a note caught by two consecutive cron runs posts once.
+    posted = _sync_note_to_people(attendees, title, summary, web_url,
+                                  source="Granola", dedup_ttl=DEDUP_LOCK_TTL)
+    if not posted:
+        print(f"  skip (no external attendee): {title}")
         return 0, 1
-
-    company_id = _get_or_create_company(domain)
-
-    attio_title = f"Granola: {title}"
-    # Cross-process/-run lock first (catches Attio's list-consistency lag),
-    # then the Attio existence check as a backstop (survives redeploys that
-    # clear the lock dir).
-    if not _claim_note(company_id, attio_title, ttl=DEDUP_LOCK_TTL):
-        print(f"  skip (dedup lock): {title}")
-        return 0, 1
-    if _attio_note_exists(company_id, attio_title):
-        print(f"  skip (already synced): {title}")
-        return 0, 1
-
-    _post_note(company_id, title, summary, web_url, source="Granola")
     return 1, 0
-
-
-def _external_domain(attendees):
-    for att in attendees:
-        email = att.get("email", "")
-        if "@" in email:
-            domain = email.split("@")[1].lower()
-            if MY_DOMAIN not in domain:
-                return domain
-    return None
 
 
 if __name__ == "__main__":

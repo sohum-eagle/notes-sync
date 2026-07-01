@@ -70,7 +70,7 @@ def _send_notification(title, domain, source, url=""):
     if not RESEND_API_KEY:
         return
     try:
-        body = f"New {source} note synced to Attio\n\nMeeting: {title}\nCompany: {domain}"
+        body = f"New {source} note synced to Attio\n\nMeeting: {title}\nAttached to: {domain}"
         if url:
             body += f"\nLink: {url}"
         r = httpx.post(
@@ -124,22 +124,36 @@ def webhook():
     if not summary:
         return jsonify(ok=True)
 
-    domain = _external_domain(payload)
-    if not domain:
-        print(f"skip (no external attendee): {title}")
-        return jsonify(ok=True)
+    posted = _sync_note_to_people(payload.get("calendar_invitees", []), title, summary, url, source="Fathom")
+    if not posted:
+        print(f"skip (no external attendee): {title}", flush=True)
+    return jsonify(ok=True, posted=len(posted))
 
-    company_id = _get_or_create_company(domain)
-    attio_title = f"Fathom: {title}"
-    # Cross-process dedup: atomic file claim beats Attio's ~90s consistency lag
-    if not _claim_note(company_id, attio_title):
-        print(f"skip (cross-process dedup): {title}", flush=True)
-        return jsonify(ok=True)
-    if _attio_note_exists(company_id, attio_title):
-        print(f"skip (already in Attio): {title}")
-        return jsonify(ok=True)
-    _post_note(company_id, title, summary, url)
-    return jsonify(ok=True)
+
+def _sync_note_to_people(invitees, title, summary, url, source, dedup_ttl=DEDUP_TTL):
+    """Attach the meeting note to each external attendee's Attio Person record.
+    Returns the list of person display-names the note was posted to. One email
+    notification is sent per meeting (not per person)."""
+    attendees = _external_attendees(invitees)
+    attio_title = f"{source}: {title}"
+    posted = []
+    for att in attendees:
+        person_id = _find_or_create_person(att["email"], att["name"])
+        if not person_id:
+            continue
+        # Cross-process dedup: atomic file claim beats Attio's list-consistency lag
+        if not _claim_note(person_id, attio_title, ttl=dedup_ttl):
+            print(f"skip (dedup lock) {att['email']}: {title}", flush=True)
+            continue
+        if _attio_note_exists("people", person_id, attio_title):
+            print(f"skip (already on person) {att['email']}: {title}", flush=True)
+            continue
+        _post_note("people", person_id, title, summary, url, source=source)
+        posted.append(att["name"])
+    if posted:
+        threading.Thread(target=_send_notification,
+                         args=(title, ", ".join(posted), source, url), daemon=True).start()
+    return posted
 
 
 def _external_domain(payload):
@@ -152,6 +166,70 @@ def _external_domain(payload):
         if d and MY_DOMAIN not in d.lower():
             return d.lower()
     return None
+
+
+def _external_attendees(invitees):
+    """Return [{'email','name'}] for every external (non-MY_DOMAIN) attendee with a valid email."""
+    seen, out = set(), []
+    for inv in invitees or []:
+        email = (inv.get("email") or "").strip().lower()
+        if "@" not in email or email in seen:
+            continue
+        domain = email.split("@")[1]
+        if MY_DOMAIN in domain:
+            continue
+        seen.add(email)
+        name = (inv.get("name") or inv.get("display_name") or inv.get("full_name") or "").strip()
+        out.append({"email": email, "name": name or _name_from_email(email)})
+    return out
+
+
+def _name_from_email(email):
+    """Derive a display name from an email local part: jorge.mcclees -> 'Jorge Mcclees'."""
+    local = email.split("@")[0]
+    parts = [p for p in local.replace("_", ".").replace("-", ".").split(".") if p]
+    return " ".join(p.capitalize() for p in parts) or email
+
+
+def _find_or_create_person(email, name=""):
+    """Find an Attio person by email, creating one (name + email) if none exists. Returns record_id or None."""
+    try:
+        cached = _cache_get(f"person:{email}")
+        if cached is not None:
+            return cached or None
+        r = httpx.post(
+            "https://api.attio.com/v2/objects/people/records/query",
+            headers=ATTIO,
+            json={"filter": {"email_addresses": {"email_address": {"$eq": email}}}, "limit": 1},
+            timeout=30,
+        )
+        rows = r.json().get("data", [])
+        if rows:
+            pid = rows[0]["id"]["record_id"]
+            _cache_set(f"person:{email}", pid)
+            return pid
+
+        name = name or _name_from_email(email)
+        first, _, last = name.partition(" ")
+        r = httpx.post(
+            "https://api.attio.com/v2/objects/people/records",
+            headers=ATTIO,
+            json={"data": {"values": {
+                "email_addresses": [email],
+                "name": [{"first_name": first, "last_name": last, "full_name": name}],
+            }}},
+            timeout=30,
+        )
+        if r.status_code >= 300:
+            print(f"person create failed for {email}: {r.status_code} {r.text[:200]}", flush=True)
+            return None
+        pid = r.json()["data"]["id"]["record_id"]
+        _cache_set(f"person:{email}", pid)
+        print(f"Created Attio person: {name} <{email}> -> {pid}".encode('ascii', 'replace').decode('ascii'), flush=True)
+        return pid
+    except Exception as e:
+        print(f"person lookup/create error for {email}: {e}", flush=True)
+        return None
 
 
 def _get_or_create_company(domain):
@@ -179,30 +257,29 @@ def _get_or_create_company(domain):
     return record_id
 
 
-def _post_note(company_id, title, summary, url, source="Fathom"):
+def _post_note(parent_object, parent_id, title, summary, url, source="Fathom"):
     link_label = f"View {source} notes"
     content = summary + (f"\n\n[{link_label}]({url})" if url else "")
     httpx.post(
         "https://api.attio.com/v2/notes",
         headers=ATTIO,
         json={"data": {
-            "parent_object":    "companies",
-            "parent_record_id": company_id,
+            "parent_object":    parent_object,
+            "parent_record_id": parent_id,
             "title":   f"{source}: {title}",
             "format":  "markdown",
             "content": content,
         }},
         timeout=30,
     )
-    print(f"{source} note created on {company_id}: {title}".encode('ascii', 'replace').decode('ascii'))
-    threading.Thread(target=_send_notification, args=(title, company_id, source, url), daemon=True).start()
+    print(f"{source} note created on {parent_object}/{parent_id}: {title}".encode('ascii', 'replace').decode('ascii'))
 
 
-def _attio_note_exists(company_id, title):
+def _attio_note_exists(parent_object, parent_id, title):
     r = httpx.get(
         "https://api.attio.com/v2/notes",
         headers=ATTIO,
-        params={"parent_object": "companies", "parent_record_id": company_id, "limit": 500},
+        params={"parent_object": parent_object, "parent_record_id": parent_id, "limit": 500},
         timeout=30,
     )
     return any(n.get("title") == title for n in r.json().get("data", []))
