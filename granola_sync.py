@@ -2,6 +2,12 @@ import os, httpx
 from datetime import datetime, timedelta, timezone
 from main import _sync_note_to_people, MY_DOMAIN
 
+try:
+    from folder_routing.hooks import on_granola_notes_listed
+except Exception:  # routing must never break the Attio sync
+    def on_granola_notes_listed(notes):
+        return 0
+
 # Lock TTL must exceed the lookback window so a note caught by two
 # consecutive cron runs (interval 15 min, lookback 20 min) is posted once.
 DEDUP_LOCK_TTL = 1800  # 30 minutes
@@ -14,6 +20,8 @@ LOOKBACK    = int(os.environ.get("GRANOLA_LOOKBACK_MINUTES", "20"))
 
 def sync(created_after=None):
     """Sync Granola notes to Attio. created_after is an ISO datetime string."""
+    # Folder routing rides only on the regular poll, never on an explicit backfill window.
+    route_folders = created_after is None
     if created_after is None:
         created_after = (datetime.now(timezone.utc) - timedelta(minutes=LOOKBACK)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -32,6 +40,8 @@ def sync(created_after=None):
                 return done, skipped
 
             data = resp.json()
+            if route_folders:
+                on_granola_notes_listed(data.get("notes", []))  # before Attio filters; never raises
             for note in data.get("notes", []):
                 d, s = _process_note(c, note)
                 done += d

@@ -55,6 +55,16 @@ except Exception as _e:
 app = Flask(__name__)
 _last_webhook = {}  # stores last received payload for debugging
 
+# Folder routing is a separate, feature-flagged pipeline (FOLDER_ROUTING_ENABLED).
+# Import failures must never take down the Attio sync.
+try:
+    from folder_routing import hooks as folder_routing_hooks
+    from folder_routing import admin as folder_routing_admin
+    app.register_blueprint(folder_routing_admin.bp)
+except Exception as _e:
+    folder_routing_hooks = folder_routing_admin = None
+    print(f"folder routing unavailable: {type(_e).__name__}", flush=True)
+
 ATTIO_KEY      = os.environ.get("ATTIO_API_KEY", "")
 MY_DOMAIN      = os.environ.get("MY_DOMAIN", "eagleeng.com")
 WEBHOOK_SECRET = os.environ.get("FATHOM_WEBHOOK_SECRET", "")
@@ -106,6 +116,9 @@ def ping():
 
 @app.route("/last-webhook")
 def last_webhook():
+    # Holds a raw payload (meeting content), so admin-only; 404 otherwise.
+    if not folder_routing_admin or not folder_routing_admin.authorized(request):
+        abort(404)
     return jsonify(_last_webhook)
 
 
@@ -117,7 +130,10 @@ def webhook():
     global _last_webhook
     _last_webhook = payload
     all_headers = dict(request.headers)
-    print(f"WEBHOOK HIT: title={payload.get('meeting_title')} sig_header={request.headers.get('x-fathom-signature','NONE')}", flush=True)
+    # Runs before, and independent of, the Attio filters below. Never raises.
+    if folder_routing_hooks:
+        folder_routing_hooks.on_fathom_webhook(request.headers, raw_body, payload)
+    print(f"WEBHOOK HIT:title={payload.get('meeting_title')} sig_header={request.headers.get('x-fathom-signature','NONE')}", flush=True)
 
     if WEBHOOK_SECRET:
         sig = request.headers.get("x-fathom-signature", "")
@@ -476,6 +492,9 @@ def _granola_scheduler():
 if os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("ENABLE_SCHEDULER"):
     threading.Thread(target=_granola_scheduler, daemon=True).start()
     print("Granola in-app scheduler started", flush=True)
+    if folder_routing_hooks:
+        from folder_routing import runtime as _folder_routing_runtime
+        _folder_routing_runtime.start_background_worker()  # no-op unless FOLDER_ROUTING_ENABLED
 
 
 if __name__ == "__main__":

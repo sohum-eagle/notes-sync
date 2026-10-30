@@ -2,3 +2,5 @@ flask
 httpx
 gunicorn
 anthropic
+psycopg[binary]>=3.2,<4
+cryptography>=42
