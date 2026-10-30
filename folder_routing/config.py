@@ -10,6 +10,16 @@ FATHOM_PLSA_FOLDER_ID = "ZQa3o3WK22ysoSGPjDsP2y9dVaLmXcqTc1ab"
 # Confirmed by the user on 2026-10-30 as PLSA-associated people using personal addresses.
 DEFAULT_PLSA_ASSOCIATED_EMAILS = ("carruthers.bryan@gmail.com", "triciaesser@gmail.com", "zack.sikora6@gmail.com")
 
+# Candidate interviews, screens, trials and the PLSA simulation exercise: never filed.
+DEFAULT_INTERVIEW_TITLE_TERMS = (
+    "interview", "candidate", "founder screen", "technical staff", "work trial", "decomposition exercise",
+    "take-home", "take home", "simulation",
+)
+# Recruiters seen on Eagle candidate calls, plus applicant-tracking systems.
+DEFAULT_RECRUITER_DOMAINS = (
+    "metric-search.com", "huxley.com", "joinef.com", "ashbyhq.com", "greenhouse.io", "lever.co",
+)
+
 DEFAULT_SENSITIVE_TERMS = (
     "confidential", "privileged", "compensation", "comp", "bonus", "equity", "salary", "severance", "termination",
     "performance review", "offer letter", "legal", "lawsuit", "litigation", "board",
@@ -50,6 +60,10 @@ class PolicyConfig:
     granola_min_segments: int = 20           # remote call: total transcript segments
     granola_min_them_segments: int = 5       # remote call: segments from other people's audio
     granola_in_person_min_segments: int = 60 # no system audio at all: longer capture required
+    max_unidentified_share: float = 0.25     # Fathom: unmatched speech share that blocks auto-filing
+    candidate_meeting_types: tuple = ("candidate interview",)
+    interview_title_terms: tuple = DEFAULT_INTERVIEW_TITLE_TERMS
+    recruiter_domains: tuple = DEFAULT_RECRUITER_DOMAINS
 
 
 @dataclass(frozen=True)
@@ -114,6 +128,10 @@ def load_settings(env=None):
         granola_min_segments=_int(env, "GRANOLA_MIN_SEGMENTS", 20),
         granola_min_them_segments=_int(env, "GRANOLA_MIN_THEM_SEGMENTS", 5),
         granola_in_person_min_segments=_int(env, "GRANOLA_IN_PERSON_MIN_SEGMENTS", 60),
+        max_unidentified_share=float(env.get("FOLDER_ROUTING_MAX_UNIDENTIFIED_SHARE", "0.25")),
+        candidate_meeting_types=_list(env, "FOLDER_ROUTING_CANDIDATE_MEETING_TYPES", ("candidate interview",)),
+        interview_title_terms=_list(env, "FOLDER_ROUTING_INTERVIEW_TITLE_TERMS", DEFAULT_INTERVIEW_TITLE_TERMS),
+        recruiter_domains=_list(env, "FOLDER_ROUTING_RECRUITER_DOMAINS", DEFAULT_RECRUITER_DOMAINS),
     )
     return Settings(
         enabled=_bool(env, "FOLDER_ROUTING_ENABLED"),

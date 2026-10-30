@@ -51,6 +51,7 @@ class SourceMeeting:
     folder_ids: list = field(default_factory=list)  # current memberships, provider REST IDs
     membership_known: bool = False
     shared_with: str = ""
+    meeting_type: str = ""        # Fathom meeting type, e.g. "Candidate Interview"
     alt_ids: dict = field(default_factory=dict)
 
     def snapshot(self):

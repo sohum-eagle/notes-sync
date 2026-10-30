@@ -40,6 +40,7 @@ All off by default. With no flags set, the only visible changes are: `/last-webh
 | `FATHOM_WEBHOOK_SECRET` | existing | Must be the `whsec_` value for routing to accept webhooks |
 | `FATHOM_API_KEY` | existing in scripts | Optional: sweep and transcript fetch |
 | `GRANOLA_API_KEY` | existing | Needs the personal scope to read the private PLSA folder |
+| `FOLDER_ROUTING_CANDIDATE_MEETING_TYPES`, `FOLDER_ROUTING_INTERVIEW_TITLE_TERMS`, `FOLDER_ROUTING_RECRUITER_DOMAINS`, `FOLDER_ROUTING_MAX_UNIDENTIFIED_SHARE` | see `config.py` | Candidate-interview exclusion and unidentified-speaker threshold |
 | `GRANOLA_MIN_SEGMENTS`, `GRANOLA_MIN_THEM_SEGMENTS`, `GRANOLA_IN_PERSON_MIN_SEGMENTS` | 20, 5, 60 | "Conversation captured" thresholds |
 | `PLSA_DOMAINS`, `PLSA_VERIFIED_EMAILS`, `INTERNAL_DOMAINS`, `INVESTOR_DOMAINS`, `FOLDER_ROUTING_SENSITIVE_TERMS`, `FOLDER_ROUTING_MIN_SPEAKER_SEGMENTS` | see `config.py` | Policy inputs |
 | `FOLDER_ROUTING_*_SWEEP_SECONDS`, `*_OVERLAP_MINUTES`, `FOLDER_ROUTING_INITIAL_LOOKBACK_MINUTES`, `FOLDER_ROUTING_MAX_ATTEMPTS`, `FOLDER_ROUTING_POLL_SECONDS` | see `config.py` | Worker tuning. First sweep looks back 60 minutes: no historical backfill |
@@ -62,7 +63,7 @@ No new Fathom or Granola webhooks are registered by this change.
 
 1. Deploy with all flags off. Attio behavior is unchanged.
 2. Provision Postgres, set `FOLDER_ROUTING_DATABASE_URL`, `FOLDER_ROUTING_ADMIN_TOKEN`, `FOLDER_ROUTING_ENABLED=1`. Classification and review queue only.
-3. `python -m folder_routing.cli capability-check`, then `verify-granola-folder-mapping --rest-id fol_...`; pin `GRANOLA_PLSA_FOLDER_REST_ID` only on PASS.
+3. `python -m folder_routing.cli seed-candidate-identities --since 2026-01-01T00:00:00Z` (read-only on Fathom), then `capability-check`, then `verify-granola-folder-mapping --rest-id fol_...`; pin `GRANOLA_PLSA_FOLDER_REST_ID` only on PASS.
 4. Watch the review queue for two weeks; tune `PLSA_VERIFIED_EMAILS` and terms.
 5. With approval: each owner runs `granola-oauth-login --account <email>`; set `GRANOLA_WRITER_EMAILS`, attestation, `FOLDER_ROUTING_TOKEN_KEY`, then both write flags. `requeue --status dry_run` replays items that qualified while writes were off.
 6. Historical backfill: not automatic. `granola_backfill.py` deliberately does not trigger routing. Run `cli dry-run --since ... --out report.md` first and get approval.

@@ -9,14 +9,14 @@ import re
 
 from .models import Decision, email_domain
 
-POLICY_VERSION = "plsa-attendance-v2"
+POLICY_VERSION = "plsa-attendance-v3"
 
-AUTO, REVIEW, SKIP = "auto_file", "review", "skip"
+AUTO, REVIEW, SKIP, EXCLUDED = "auto_file", "review", "skip", "excluded"
 
 STRONG = ("plsa_speaker_verified", "plsa_note_owner", "plsa_attendance_corroborated", "plsa_meeting_evident")
 MEDIUM = ("plsa_recorder", "plsa_speaker_name_only", "plsa_speaker_below_min_segments")
 WEAK = ("plsa_invitee_only", "plsa_attendee_listed", "plsa_title_mention")
-BLOCKERS = ("third_party_present", "investor_present", "sensitive_title")
+BLOCKERS = ("third_party_present", "investor_present", "sensitive_title", "unidentified_speaker")
 
 EXPLAIN = {
     "plsa_speaker_verified": "a transcript speaker was matched by the provider to a verified PLSA email",
@@ -36,6 +36,12 @@ EXPLAIN = {
     "third_party_present": "non-PLSA external parties were invited or spoke",
     "investor_present": "investor (LSVP) participants were invited or spoke",
     "sensitive_title": "the title matches a sensitive-topic term",
+    "unidentified_speaker": "a large share of the speech came from people the provider could not match to the invite",
+    "candidate_interview_type": "Fathom meeting type is a candidate interview; never filed",
+    "interview_title": "the title marks a candidate interview, screen, trial or simulation; never filed",
+    "known_candidate_present": "a participant previously appeared as a candidate; never filed",
+    "recruiter_present": "a recruiter or applicant-tracking address is on the meeting; never filed",
+    "related_candidate_interview": "another recording of this meeting was excluded as a candidate interview; never filed",
     "internal_or_investor_only": "only Eagle/LSVP participants; never auto-filed",
     "no_plsa_signal": "no PLSA identity or mention",
     "no_transcript": "no transcript, so attendance cannot be verified",
@@ -81,9 +87,38 @@ def _conversation_captured(meeting, cfg):
     return total >= cfg.granola_in_person_min_segments
 
 
-def classify(meeting, cfg, corroborated_by=()):
+def participant_emails(meeting):
+    emails = {p.email for p in meeting.invitees + meeting.attendees if p.email}
+    emails |= {s.matched_email for s in meeting.speakers if s.matched_email}
+    if meeting.owner_email:
+        emails.add(meeting.owner_email)
+    return emails
+
+
+def exclusion_reasons(meeting, cfg, known_candidates=(), related_excluded=()):
+    """Candidate interviews (including the PLSA simulation trial) are never filed or queued for filing."""
+    reasons = []
+    if (meeting.meeting_type or "").strip().lower() in cfg.candidate_meeting_types:
+        reasons.append("candidate_interview_type")
+    if _title_terms(meeting.title, cfg.interview_title_terms):
+        reasons.append("interview_title")
+    emails = participant_emails(meeting)
+    if emails & set(known_candidates):
+        reasons.append("known_candidate_present")
+    if any(email_domain(e) == d or email_domain(e).endswith("." + d) for e in emails for d in cfg.recruiter_domains):
+        reasons.append("recruiter_present")
+    if related_excluded:
+        reasons.append("related_candidate_interview")
+    return reasons
+
+
+def classify(meeting, cfg, corroborated_by=(), known_candidates=(), related_excluded=()):
     """corroborated_by: IDs of other-provider recordings of the same slot whose own decision
-    rested on plsa_speaker_verified (looked up by the pipeline, never inferred from text)."""
+    rested on plsa_speaker_verified (looked up by the pipeline, never inferred from text).
+    known_candidates / related_excluded feed the candidate-interview exclusion, which wins over everything."""
+    excluded = exclusion_reasons(meeting, cfg, known_candidates, related_excluded)
+    if excluded:
+        return Decision(EXCLUDED, excluded, {"exclusion": excluded}, POLICY_VERSION, explain(EXCLUDED, excluded))
     ids = Identities(cfg)
     reasons, evidence = [], {}
     if corroborated_by:
@@ -169,6 +204,11 @@ def classify(meeting, cfg, corroborated_by=()):
             reasons.append("others_spoke_unidentified")
     if meeting.provider == "fathom":
         evidence["fathom_speakers_matched"] = sum(1 for s in meeting.speakers if s.matched_email)
+        total = sum(s.segments for s in meeting.speakers)
+        unmatched = sum(s.segments for s in meeting.speakers if not s.matched_email)
+        if total and unmatched >= 20 and unmatched / total >= cfg.max_unidentified_share:
+            reasons.append("unidentified_speaker")
+            evidence["unidentified_share"] = round(unmatched / total, 2)
 
     kinds = {k for k in everyone.values() if k and k != "ignore"}
     if owner_kind and owner_kind != "ignore":

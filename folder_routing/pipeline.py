@@ -14,7 +14,8 @@ from . import log
 from .http import ApiError
 from .models import SourceMeeting
 from .normalize import fathom_speakers, granola_note_to_source
-from .policy import AUTO, REVIEW, SKIP, classify, downgrade
+from .policy import AUTO, EXCLUDED, REVIEW, SKIP, Identities, classify, downgrade, exclusion_reasons, \
+    participant_emails
 from .providers import CapabilityUnavailable, WriteRejected, WriteUncertain
 from .providers.mcp_client import McpError
 from .providers.oauth import TokenUnavailable
@@ -78,6 +79,13 @@ class Pipeline:
         key = (provider, source_id, dest.key)
         self.store.upsert_source(meeting)
         op = self.store.get_op(*key)
+        related = self.store.find_related_sources(meeting)
+
+        # Candidate interviews (including the PLSA simulation) come first and override everything:
+        # never filed, never queued for manual filing, never reconsidered.
+        known, related_excluded = self._exclusion_inputs(meeting, related)
+        if exclusion_reasons(meeting, self.s.policy, known, related_excluded) or (op and op["status"] == "excluded"):
+            return self._exclude(meeting, dest, op, related, known, related_excluded)
 
         if self._is_member_now(meeting, dest):
             if not op or op["status"] not in ("already_member", "verified"):
@@ -91,7 +99,6 @@ class Pipeline:
                 self.store.audit(self.actor, "membership_removed_externally", *key, outcome="noop")
             return f"terminal:{op['status']}"
 
-        related = self.store.find_related_sources(meeting)
         same = [f"{r['provider']}:{r['source_id']}" for r in related if r["provider"] == provider]
         others = [r for r in related if r["provider"] != provider]
         corroborated = []
@@ -123,6 +130,48 @@ class Pipeline:
             return self._review(meeting, dest, decision, decision_id,
                                 ["auto_qualified", "writes_disabled"], op_status="dry_run")
         return self._write_granola(meeting, dest, decision, decision_id)
+
+    # ── candidate interviews ─────────────────────────────────────────────
+    def _exclusion_inputs(self, meeting, related):
+        known = self.store.known_candidates(participant_emails(meeting))
+        excluded = []
+        for r in related:
+            prior = self.store.latest_decision(r["provider"], r["source_id"])
+            if prior and prior["decision"] == EXCLUDED:
+                excluded.append(f"{r['provider']}:{r['source_id']}")
+        return known, excluded
+
+    def _exclude(self, meeting, dest, op, related, known, related_excluded):
+        key = (meeting.provider, meeting.source_id, dest.key)
+        decision = classify(meeting, self.s.policy, known_candidates=known, related_excluded=related_excluded)
+        if decision.decision != EXCLUDED:  # op was excluded earlier; signals since changed. Still never filed.
+            decision = type(decision)(EXCLUDED, ["previously_excluded"], {}, decision.policy_version,
+                                      "EXCLUDED: previously excluded as a candidate interview; never filed")
+        decision_id = self.store.record_decision(meeting, dest.key, decision)
+        self._learn_candidates(meeting)
+        in_folder = self._is_member_now(meeting, dest) or (op and op["status"] in ("verified", "already_member"))
+        self.store.exclude(*key, decision_id)
+        # Never removed automatically; a person decides.
+        self.store.audit(self.actor, "candidate_interview_in_folder" if in_folder else "candidate_interview_excluded",
+                         *key, outcome=",".join(decision.reasons))
+        for r in related:  # other recordings of the same meeting get excluded too
+            prior = self.store.latest_decision(r["provider"], r["source_id"])
+            if not prior or prior["decision"] != EXCLUDED:
+                self.store.enqueue(r["provider"], r["source_id"])
+        log(f"{key[0]}:{key[1]} excluded reasons={','.join(decision.reasons)} in_folder={bool(in_folder)}")
+        return "excluded"
+
+    def _learn_candidates(self, meeting):
+        """People outside Eagle/PLSA/LSVP on a typed candidate interview are candidates or recruiters."""
+        if (meeting.meeting_type or "").strip().lower() not in self.s.policy.candidate_meeting_types:
+            return
+        ids = Identities(self.s.policy)
+        emails = {e for e in participant_emails(meeting) if ids.kind(e) == "external"}
+        new = self.store.add_candidate_identities(emails, f"{meeting.provider}:{meeting.source_id}")
+        if new:
+            for r in self.store.sources_with_participants(new):
+                if (r["provider"], r["source_id"]) != (meeting.provider, meeting.source_id):
+                    self.store.enqueue(r["provider"], r["source_id"])
 
     # ── helpers ──────────────────────────────────────────────────────────
     def _membership_readable(self, meeting, dest):
@@ -209,6 +258,11 @@ class Pipeline:
         if problem:
             return self._review(meeting, dest, decision, decision_id, ["auto_qualified", problem])
 
+        # Last check before any write, independent of the decision above.
+        known = self.store.known_candidates(participant_emails(meeting))
+        if exclusion_reasons(meeting, self.s.policy, known):
+            self.store.exclude(*key, decision_id)
+            return "excluded"
         prior = self.store.claim_op_for_write(*key, decision_id)
         if prior is None:
             return "op_held_elsewhere"

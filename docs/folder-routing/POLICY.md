@@ -1,12 +1,28 @@
 # Classification policy and proposed audience rules
 
-Policy version: `plsa-attendance-v2` (`folder_routing/policy.py`). Every decision is stored in `fr_decisions` with its reasons, evidence (emails, domains, counts; never content) and policy version.
+Policy version: `plsa-attendance-v3` (`folder_routing/policy.py`). Every decision is stored in `fr_decisions` with its reasons, evidence (emails, domains, counts; never content) and policy version.
 
 ## Inputs
 
 Identities, calendar invitees, Granola attendee lists, note owner / Fathom recorder, and speaker metadata (Fathom: provider-matched email and segment count; Granola: `me`/`them` counts). Transcript text and summaries are never stored, logged or interpreted. No model is called, so meeting content cannot steer a decision.
 
 Identity classes: `plsa` (domain `plsaengineering.com` or an address in `PLSA_VERIFIED_EMAILS`, default: carruthers.bryan@gmail.com, triciaesser@gmail.com, zack.sikora6@gmail.com), `internal` (`eagleeng.com`), `investor` (`lsvp.com`, `opslsvp.com`), `ignore` (Google resource calendars), `external` (everything else, including personal Gmail).
+
+## Candidate interviews: never filed
+
+Checked first, before membership and before any other rule. A match is final: the item is never written, never put in the manual review queue, its folder op is permanently `excluded`, and later changes (a renamed title) cannot undo it.
+
+| Signal | Source |
+|---|---|
+| `candidate_interview_type` | Fathom meeting type "Candidate Interview" (`FOLDER_ROUTING_CANDIDATE_MEETING_TYPES`) |
+| `interview_title` | Title terms: interview, candidate, founder screen, technical staff, work trial, decomposition exercise, take-home, simulation (`FOLDER_ROUTING_INTERVIEW_TITLE_TERMS`) |
+| `known_candidate_present` | Anyone outside Eagle, PLSA and LSVP who appeared on a typed candidate interview, in either tool |
+| `recruiter_present` | Recruiter or applicant-tracking domains (`FOLDER_ROUTING_RECRUITER_DOMAINS`) |
+| `related_candidate_interview` | Another recording of the same meeting was excluded |
+
+Candidate identities are learned automatically from typed Fathom interviews; seed history once with `cli seed-candidate-identities --since 2026-01-01T00:00:00Z`. If an interview is already in a folder, it is flagged in the audit log (`candidate_interview_in_folder`) and left for a person to remove.
+
+Trade-off: "simulation" in a title excludes the meeting even if it is engineering work (none this year; stormwater modeling calls are titled "SWMM").
 
 ## Rules
 
@@ -18,7 +34,7 @@ Identity classes: `plsa` (domain `plsaengineering.com` or an address in `PLSA_VE
 | `plsa_meeting_evident` | strong | Granola note captured by an Eagle person; PLSA-affiliated people are at least half of everyone else invited; a conversation was captured (remote: 20+ segments with 5+ from other people's audio; in person, no system audio: 60+ segments) |
 | `plsa_recorder`, `plsa_speaker_name_only`, `plsa_speaker_below_min_segments` | medium | Review |
 | `plsa_invitee_only`, `plsa_attendee_listed`, `plsa_title_mention` | weak | Review (calendar invitees and titles are not attendance) |
-| `third_party_present`, `investor_present`, `sensitive_title`, `possible_duplicate_recording` | blocker | Forces review even with a strong signal |
+| `third_party_present`, `investor_present`, `sensitive_title`, `possible_duplicate_recording`, `unidentified_speaker` (Fathom: 25%+ of speech from people not on the invite) | blocker | Forces review even with a strong signal |
 
 Outcome: **auto_file** only with a strong signal and no blocker. **review** with any PLSA signal. **skip** otherwise; Eagle/LSVP-only calls are labelled `internal_or_investor_only` and never auto-filed.
 
@@ -48,5 +64,6 @@ Known gap: MCP reports the audience as a phrase, not a member list. Adding a per
 2. Teammates' notes are filed if applicable, using each teammate's own login, never the folder owner's.
 3. The folder has no Attio auto-post; Attio duplication is not a concern.
 4. Granola notes are filed when it is clearly evident the meeting was with PLSA-affiliated people (`plsa_meeting_evident`).
+5. Candidate interviews, including the PLSA simulation trial, are never added to either PLSA folder.
 
 Still review-only by default: investors or other outside parties present, sensitive titles, duplicate recordings, Eagle-majority meetings.

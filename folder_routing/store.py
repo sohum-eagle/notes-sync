@@ -119,6 +119,11 @@ CREATE TABLE IF NOT EXISTS fr_oauth_tokens (
   ciphertext text NOT NULL,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS fr_candidate_identities (
+  email text PRIMARY KEY,
+  source text NOT NULL,
+  first_seen_at timestamptz NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS fr_audit_log (
   id bigserial PRIMARY KEY,
   ts timestamptz NOT NULL DEFAULT now(),
@@ -134,7 +139,7 @@ CREATE TABLE IF NOT EXISTS fr_audit_log (
 
 # Folder-op states a worker may take over to (re)attempt a write.
 RETRYABLE_OP_STATES = ("planned", "dry_run", "uncertain", "unverified", "failed_retryable", "review")
-TERMINAL_OP_STATES = ("verified", "already_member", "blocked")
+TERMINAL_OP_STATES = ("verified", "already_member", "blocked", "excluded")
 
 
 class Store:
@@ -283,7 +288,7 @@ class Store:
                 "VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (provider, source_id, destination) DO UPDATE SET "
                 "status=EXCLUDED.status, decision_id=COALESCE(EXCLUDED.decision_id, fr_folder_ops.decision_id), "
                 "last_error=EXCLUDED.last_error, lease_until=NULL, updated_at=now() "
-                "WHERE fr_folder_ops.status NOT IN ('verified','already_member','blocked') "
+                "WHERE fr_folder_ops.status NOT IN ('verified','already_member','blocked','excluded') "
                 "AND NOT (fr_folder_ops.status='writing' AND fr_folder_ops.lease_until > now())",
                 (provider, source_id, destination, status, decision_id, error))
 
@@ -340,6 +345,46 @@ class Store:
                 "WHERE fr_review_queue.status='open'",
                 (provider, source_id, destination, Jsonb(["processing_failed", code[:100]]),
                  "REVIEW: processing failed after retries", policy_version, provider, source_id))
+
+    def exclude(self, provider, source_id, destination, decision_id=None):
+        """Permanent: the op can never be claimed for a write again and any open review item is closed."""
+        with self.conn() as c:
+            c.execute(
+                "INSERT INTO fr_folder_ops (provider, source_id, destination, status, decision_id) "
+                "VALUES (%s,%s,%s,'excluded',%s) ON CONFLICT (provider, source_id, destination) DO UPDATE SET "
+                "status = CASE WHEN fr_folder_ops.status IN ('verified','already_member') THEN fr_folder_ops.status "
+                "ELSE 'excluded' END, decision_id=COALESCE(EXCLUDED.decision_id, fr_folder_ops.decision_id), "
+                "lease_until=NULL, updated_at=now()",
+                (provider, source_id, destination, decision_id))
+            c.execute(
+                "UPDATE fr_review_queue SET status='excluded', resolved_by='system', resolved_at=now(), updated_at=now() "
+                "WHERE provider=%s AND source_id=%s AND destination=%s AND status='open'",
+                (provider, source_id, destination))
+
+    # ── candidate identities (people seen in candidate interviews) ──────
+    def add_candidate_identities(self, emails, source):
+        if not emails:
+            return []
+        with self.conn() as c:
+            rows = c.execute(
+                "INSERT INTO fr_candidate_identities (email, source) SELECT e, %s FROM unnest(%s::text[]) AS e "
+                "ON CONFLICT DO NOTHING RETURNING email", (source, sorted(emails))).fetchall()
+        return [r["email"] for r in rows]
+
+    def known_candidates(self, emails):
+        if not emails:
+            return set()
+        with self.conn() as c:
+            rows = c.execute("SELECT email FROM fr_candidate_identities WHERE email = ANY(%s)",
+                             (sorted(emails),)).fetchall()
+        return {r["email"] for r in rows}
+
+    def sources_with_participants(self, emails):
+        with self.conn() as c:
+            return c.execute(
+                "SELECT provider, source_id FROM fr_sources s WHERE EXISTS ("
+                "  SELECT 1 FROM jsonb_array_elements((s.snapshot->'invitees') || (s.snapshot->'attendees')) AS p(v) "
+                "  WHERE p.v->>'email' = ANY(%s))", (sorted(emails),)).fetchall()
 
     def supersede_review(self, provider, source_id, destination, actor="system"):
         with self.conn() as c:

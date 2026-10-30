@@ -25,6 +25,7 @@ Sources:
 - The Fathom MCP connector says "All tools are read-only" and has no folder tools.
 - Zapier's Fathom app has 6 triggers and 0 actions.
 - Result: writer hard-disabled (`FathomFolderWriter` raises `CapabilityUnavailable`; no flag enables it). Qualifying calls go to the review queue with the call link. See `FATHOM_MANUAL_FALLBACK.md`. No browser cookies, no undocumented endpoints.
+- `GET /meeting_types` and the `meeting_type` field expose the org's "Candidate Interview" type, used to exclude interviews.
 - IDs: `recording_id` (integer) is the immutable key. It differs from the number in `fathom.video/calls/<n>` URLs.
 - Webhooks are signed with Standard Webhooks headers (`webhook-id`, `webhook-timestamp`, `webhook-signature`, secret `whsec_...`). Retries reuse `webhook-id` (FAQ), which is the delivery dedup key.
 

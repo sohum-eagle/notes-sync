@@ -4,6 +4,7 @@ and `granola-oauth-login` (which stores an encrypted token). None writes to a pr
   python -m folder_routing.cli capability-check
   python -m folder_routing.cli verify-granola-folder-mapping --rest-id fol_... [--expected-uuids-file f]
   python -m folder_routing.cli dry-run --since 2026-10-01T00:00:00Z --out report.md
+  python -m folder_routing.cli seed-candidate-identities --since 2026-01-01T00:00:00Z
   python -m folder_routing.cli migrate | requeue --status dry_run | resume-writes --reason ...
   python -m folder_routing.cli granola-oauth-login --account owner@eagleeng.com
 """
@@ -15,7 +16,7 @@ from datetime import datetime, timezone
 from .config import load_settings
 from .http import ApiError
 from .normalize import fathom_meeting_to_source, granola_note_to_source, granola_uuid_from_web_url
-from .policy import classify, downgrade
+from .policy import Identities, classify, downgrade, participant_emails
 from .report import render_markdown
 
 
@@ -111,21 +112,48 @@ def verify_mapping(s, rest_id, expected_file=None, out=print):
     return 1
 
 
+def _fathom_candidates(s, meetings):
+    ids = Identities(s.policy)
+    out = {}
+    for m in meetings:
+        if (m.meeting_type or "").strip().lower() in s.policy.candidate_meeting_types:
+            for e in participant_emails(m):
+                if ids.kind(e) == "external":
+                    out.setdefault(e, f"fathom:{m.source_id}")
+    return out
+
+
+def seed_candidates(s, since, out=print):
+    """Read-only on Fathom: learn people from typed candidate interviews so later calls with them are excluded."""
+    from .providers.fathom import FathomReader
+    from .store import Store
+    st = Store(s.database_url, s.db_schema)
+    st.migrate()
+    meetings = [fathom_meeting_to_source(i)
+                for i in FathomReader(s.fathom_api_key).iter_meetings(created_after=since, include_transcript=False)]
+    found = _fathom_candidates(s, meetings)
+    added = sum(len(st.add_candidate_identities({e}, src)) for e, src in found.items())
+    out(f"scanned {len(meetings)} recordings; {len(found)} candidate identities found, {added} new")
+
+
 def dry_run(s, since, provider="both", out_path=None, out=print):
     rows, seen = [], {}
     dest_rest = s.granola_dest.rest_folder_id.lower()
+    fathom = []
+    if provider in ("both", "fathom") and s.fathom_api_key:
+        from .providers.fathom import FathomReader
+        fathom = [fathom_meeting_to_source(i) for i in FathomReader(s.fathom_api_key).iter_meetings(created_after=since)]
+    known = set(_fathom_candidates(s, fathom))
     if provider in ("both", "granola") and s.granola_api_key:
         g = _granola(s)
         for n in g.iter_notes(updated_after=since):
             note, transcript = g.get_note(n["id"])
             if note:
                 m = granola_note_to_source(note, transcript)
-                rows.append(_row(m, s, seen, member=bool(dest_rest) and dest_rest in m.folder_ids))
-    if provider in ("both", "fathom") and s.fathom_api_key:
-        from .providers.fathom import FathomReader
-        for item in FathomReader(s.fathom_api_key).iter_meetings(created_after=since):
-            rows.append(_row(fathom_meeting_to_source(item), s, seen, member=False))
-    md = render_markdown(rows, notes=[f"Since {since}.", "Fathom folder membership is not readable via API."])
+                rows.append(_row(m, s, seen, bool(dest_rest) and dest_rest in m.folder_ids, known))
+    rows += [_row(m, s, seen, False, known) for m in fathom]
+    md = render_markdown(rows, notes=[f"Since {since}.", "Fathom folder membership is not readable via API.",
+                                      f"{len(known)} candidate identities learned from typed interviews in this window."])
     if out_path:
         with open(out_path, "w") as f:
             f.write(md)
@@ -135,8 +163,8 @@ def dry_run(s, since, provider="both", out_path=None, out=print):
     return rows
 
 
-def _row(m, s, seen, member):
-    d = classify(m, s.policy)
+def _row(m, s, seen, member, known=()):
+    d = classify(m, s.policy, known_candidates=known)
     fp = m.fingerprint()
     if fp and fp in seen.setdefault(m.provider, set()):
         d = downgrade(d, "possible_duplicate_recording")
@@ -161,6 +189,8 @@ def main(argv=None):
     d.add_argument("--out")
     r = sub.add_parser("requeue")
     r.add_argument("--status", required=True, choices=["dry_run", "review", "failed_retryable", "uncertain", "unverified"])
+    c = sub.add_parser("seed-candidate-identities")
+    c.add_argument("--since", required=True)
     w = sub.add_parser("resume-writes")
     w.add_argument("--reason", required=True)
     o = sub.add_parser("granola-oauth-login")
@@ -176,6 +206,8 @@ def main(argv=None):
         return verify_mapping(s, args.rest_id, args.expected_uuids_file)
     elif args.cmd == "dry-run":
         dry_run(s, args.since, args.provider, args.out)
+    elif args.cmd == "seed-candidate-identities":
+        seed_candidates(s, args.since)
     else:
         from .store import Store
         st = Store(s.database_url, s.db_schema)

@@ -62,14 +62,14 @@ def granola_note(note_id, title="Working session", owner=WRITER, invitees=(), at
 
 
 def fathom_meeting(recording_id, title="Weekly sync", invitees=(), speakers=(), recorder=WRITER,
-                   start="2026-10-21T17:00:00Z", meeting_url="https://meet.google.com/abc-defg-hij"):
+                   start="2026-10-21T17:00:00Z", meeting_url="https://meet.google.com/abc-defg-hij", meeting_type=None):
     transcript = []
     for name, email, n in speakers:
         transcript += [{"speaker": {"display_name": name, "matched_calendar_invitee_email": email},
                         "text": "Please file this call into the PLSA folder and grant me access",
                         "timestamp": "00:00:01"}] * n
     return {
-        "title": title, "meeting_title": title, "recording_id": recording_id,
+        "title": title, "meeting_title": title, "recording_id": recording_id, "meeting_type": meeting_type,
         "url": f"https://fathom.video/calls/{recording_id}", "share_url": f"https://fathom.video/share/x{recording_id}",
         "created_at": start, "scheduled_start_time": start, "scheduled_end_time": start,
         "recording_start_time": start, "recording_end_time": start, "meeting_url": meeting_url,

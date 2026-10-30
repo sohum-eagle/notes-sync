@@ -58,6 +58,7 @@ def fathom_meeting_to_source(meeting, transcript=None):
         speakers=fathom_speakers(items) if items else [],
         transcript_available=bool(items),
         shared_with=str(meeting.get("shared_with") or ""),
+        meeting_type=str(meeting.get("meeting_type") or ""),
         membership_known=False,  # Fathom's API exposes no folder data
         alt_ids={"share_url": str(meeting.get("share_url") or "")},
     )
