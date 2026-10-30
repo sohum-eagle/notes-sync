@@ -27,17 +27,18 @@ class RetryLater(Exception):
 
 
 class Pipeline:
-    def __init__(self, settings, store, fathom_reader=None, granola_reader=None, granola_writer=None,
+    def __init__(self, settings, store, fathom_reader=None, granola_reader=None, granola_writers=None,
                  actor="worker", clock=time.time, audience_ttl=300):
+        """granola_writers: callable(owner_email) -> writer acting with that owner's own login, or None."""
         self.s = settings
         self.store = store
         self.fathom = fathom_reader
         self.granola = granola_reader
-        self.writer = granola_writer
+        self.writer_for = granola_writers or (lambda email: None)
         self.actor = actor
         self.clock = clock
         self.audience_ttl = audience_ttl
-        self._audience = None  # (checked_at, problem)
+        self._audience = {}  # owner -> (checked_at, (problem, scope))
 
     # ── loading ──────────────────────────────────────────────────────────
     def load(self, provider, source_id):
@@ -135,34 +136,37 @@ class Pipeline:
         self.store.set_op(meeting.provider, meeting.source_id, dest.key, op_status, decision_id)
         return op_status
 
-    def check_destination(self, dest):
-        """None if the folder still matches the approved configuration, else a reason code. Cached briefly."""
+    def check_destination(self, dest, writer, owner):
+        """(problem, scope) or (None, None), cached briefly per owner.
+        scope 'folder': the folder no longer matches the approved configuration, so all writes halt.
+        scope 'owner': only this owner cannot file (not a member, viewer role)."""
         now = self.clock()
-        if self._audience and now - self._audience[0] < self.audience_ttl:
-            return self._audience[1]
-        folder = self.writer.get_folder(dest.folder_id)
-        problem = None
+        cached = self._audience.get(owner)
+        if cached and now - cached[0] < self.audience_ttl:
+            return cached[1]
+        folder = writer.get_folder(dest.folder_id)
+        result = (None, None)
         if folder is None:
-            problem = "destination_not_found"
+            result = ("destination_not_visible_to_owner", "owner")
         elif folder.title != dest.expected_title:
-            problem = "destination_title_changed"
+            result = ("destination_title_changed", "folder")
         elif folder.visibility != dest.approved_visibility:
-            problem = "destination_visibility_changed"
+            result = ("destination_visibility_changed", "folder")
         elif folder.audience != dest.approved_audience:
-            problem = "destination_audience_changed"
+            result = ("destination_audience_changed", "folder")
         elif (folder.parent_folder_id or "") != (dest.approved_parent_folder_id or ""):
-            problem = "destination_moved"
+            result = ("destination_moved", "folder")
         elif folder.role not in ("owner", "collaborator"):
-            problem = "writer_lacks_folder_role"
+            result = ("owner_lacks_folder_role", "owner")
         else:
             for ep in self.granola.list_webhook_endpoints():
                 fids = [str(x).lower() for x in ep.get("folder_ids") or []]
                 if dest.rest_folder_id.lower() in fids and str(ep.get("id", "")).lower() not in \
                         self.s.granola_approved_webhook_ids:
-                    problem = "unapproved_downstream_webhook"
+                    result = ("unapproved_downstream_webhook", "folder")
                     break
-        self._audience = (now, problem)
-        return problem
+        self._audience[owner] = (now, result)
+        return result
 
     def _verify(self, meeting, dest):
         try:
@@ -173,32 +177,36 @@ class Pipeline:
 
     def _write_granola(self, meeting, dest, decision, decision_id):
         key = (meeting.provider, meeting.source_id, dest.key)
+        owner = meeting.owner_email
+        writer = self.writer_for(owner) if owner in self.s.granola_writer_emails else None
         gate = None
         if self.store.writes_halted():
             gate = "writes_halted"
-        elif self.writer is None:
-            gate = "writer_unconfigured"
         elif not dest.rest_folder_id:
             gate = "folder_mapping_unverified"
         elif not meeting.membership_known:
             gate = "membership_unknown"
-        elif not self.s.granola_writer_email or meeting.owner_email != self.s.granola_writer_email:
-            gate = "not_owned_by_writer"  # never file a teammate's note on their behalf
+        elif owner not in self.s.granola_writer_emails:
+            gate = "owner_authorization_needed"  # filed only with the owner's own login, never someone else's
+        elif writer is None:
+            gate = "writer_unconfigured"
         elif not self.s.granola_integrations_attestation:
             gate = "folder_integrations_unattested"
         if gate:
             return self._review(meeting, dest, decision, decision_id, ["auto_qualified", gate])
 
         try:
-            problem = self.check_destination(dest)
+            problem, scope = self.check_destination(dest, writer, owner)
         except (TokenUnavailable, CapabilityUnavailable) as e:
-            self.store.halt_writes(f"writer_unavailable:{e.code}")
-            return self._review(meeting, dest, decision, decision_id, ["auto_qualified", "writer_unavailable"])
+            self.store.audit(self.actor, "owner_login_unavailable", *key, outcome=e.code)
+            return self._review(meeting, dest, decision, decision_id, ["auto_qualified", "owner_login_unavailable"])
         except (ApiError, McpError) as e:
             raise RetryLater(f"audience_check_{e.code}")
-        if problem:
+        if problem and scope == "folder":
             self.store.halt_writes(problem)
             log(f"writes halted: {problem}")
+            return self._review(meeting, dest, decision, decision_id, ["auto_qualified", problem])
+        if problem:
             return self._review(meeting, dest, decision, decision_id, ["auto_qualified", problem])
 
         prior = self.store.claim_op_for_write(*key, decision_id)
@@ -207,7 +215,7 @@ class Pipeline:
         try:
             if prior in ("uncertain", "unverified") and self._verify(meeting, dest):
                 return self._verified(key, "verified_after_uncertain")
-            result = self.writer.add(meeting.source_id, dest.folder_id)
+            result = writer.add(meeting.source_id, dest.folder_id)
         except WriteRejected as e:
             self.store.finish_op(*key, "blocked", e.code)
             self.store.audit(self.actor, "folder_add_rejected", *key, outcome=e.code)
@@ -218,10 +226,11 @@ class Pipeline:
             self.store.audit(self.actor, "folder_add_uncertain", *key, outcome=e.code)
             raise RetryLater(e.code)
         except (TokenUnavailable, CapabilityUnavailable) as e:
+            # One owner's login expired or was revoked: their notes wait; other owners keep filing.
             self.store.finish_op(*key, "failed_retryable", e.code)
-            self.store.halt_writes(f"writer_unavailable:{e.code}")
-            self.store.upsert_review(meeting, dest.key, decision, ["auto_qualified", "writer_unavailable"])
-            return "halted"
+            self.store.audit(self.actor, "owner_login_unavailable", *key, outcome=e.code)
+            self.store.upsert_review(meeting, dest.key, decision, ["auto_qualified", "owner_login_unavailable"])
+            return "owner_login_unavailable"
         except (ApiError, McpError, RetryLater) as e:
             keep = prior if prior in ("uncertain", "unverified") else "failed_retryable"
             self.store.finish_op(*key, keep, getattr(e, "code", type(e).__name__))

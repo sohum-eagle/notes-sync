@@ -2,18 +2,18 @@
 
 No model calls and no transcript text: decisions use identities, calendar
 metadata and speaker attribution counts only, so meeting content cannot steer
-them. Signals only move a call toward review, except the two strong
-attendance signals, which can auto-file only when nothing sensitive is present.
+them. Signals only move a call toward review, except the strong attendance
+signals, which can auto-file only when nothing sensitive is present.
 """
 import re
 
 from .models import Decision, email_domain
 
-POLICY_VERSION = "plsa-attendance-v1"
+POLICY_VERSION = "plsa-attendance-v2"
 
 AUTO, REVIEW, SKIP = "auto_file", "review", "skip"
 
-STRONG = ("plsa_speaker_verified", "plsa_note_owner", "plsa_attendance_corroborated")
+STRONG = ("plsa_speaker_verified", "plsa_note_owner", "plsa_attendance_corroborated", "plsa_meeting_evident")
 MEDIUM = ("plsa_recorder", "plsa_speaker_name_only", "plsa_speaker_below_min_segments")
 WEAK = ("plsa_invitee_only", "plsa_attendee_listed", "plsa_title_mention")
 BLOCKERS = ("third_party_present", "investor_present", "sensitive_title")
@@ -23,6 +23,10 @@ EXPLAIN = {
     "plsa_note_owner": "the Granola note was captured by a verified PLSA identity",
     "plsa_attendance_corroborated": "another provider's recording of the same calendar slot and invitee list "
                                     "has a provider-matched PLSA speaker",
+    "plsa_meeting_evident": "Eagle-captured Granola note where PLSA-affiliated people are at least half of the "
+                            "other participants, nobody else outside Eagle was invited, and a conversation was captured",
+    "plsa_minority_of_participants": "PLSA-affiliated people are fewer than half of the other participants",
+    "no_conversation_captured": "the transcript does not show a conversation with others",
     "plsa_recorder": "the Fathom recorder is a PLSA identity, but no PLSA speaker was matched",
     "plsa_speaker_name_only": "a speaker name matches a PLSA invitee, but the provider did not match the email",
     "plsa_speaker_below_min_segments": "a PLSA speaker was matched but spoke too little to rely on",
@@ -67,6 +71,16 @@ def _title_terms(title, terms):
     return sorted({t for t in terms if re.search(r"(?<![a-z0-9])" + re.escape(t) + r"(?![a-z0-9])", lowered)})
 
 
+def _conversation_captured(meeting, cfg):
+    """Remote call: enough speech with other people's audio. In person: no system audio, long enough capture."""
+    total = sum(s.segments for s in meeting.speakers)
+    them = sum(s.segments for s in meeting.speakers if s.attribution == "them")
+    system_audio = sum(s.segments for s in meeting.speakers if s.source == "speaker")
+    if system_audio:
+        return total >= cfg.granola_min_segments and them >= cfg.granola_min_them_segments
+    return total >= cfg.granola_in_person_min_segments
+
+
 def classify(meeting, cfg, corroborated_by=()):
     """corroborated_by: IDs of other-provider recordings of the same slot whose own decision
     rested on plsa_speaker_verified (looked up by the pipeline, never inferred from text)."""
@@ -103,6 +117,20 @@ def classify(meeting, cfg, corroborated_by=()):
         evidence["plsa_speaker_names"] = sorted(set(name_only))
     if below_min and not verified:
         reasons.append("plsa_speaker_below_min_segments")
+    if meeting.provider == "granola" and owner_kind == "internal" and not any(r in reasons for r in STRONG):
+        # "Clearly with PLSA": an Eagle person's own capture, PLSA-affiliated people are at least half of
+        # everyone else on the meeting, and a conversation was recorded. Blockers below still apply.
+        others = {e: k for e, k in {**invitee_kinds, **attendee_kinds}.items()
+                  if e != meeting.owner_email and k not in ("", "ignore")}
+        n_plsa = sum(1 for k in others.values() if k == "plsa")
+        if n_plsa:
+            evidence["plsa_share_of_others"] = f"{n_plsa}/{len(others)}"
+            if n_plsa * 2 < len(others):
+                reasons.append("plsa_minority_of_participants")
+            elif not _conversation_captured(meeting, cfg):
+                reasons.append("no_conversation_captured")
+            else:
+                reasons.append("plsa_meeting_evident")
     if plsa_invitees and not any(r in reasons for r in STRONG):
         reasons.append("plsa_invitee_only")
     if plsa_attendees and not any(r in reasons for r in STRONG):
@@ -136,6 +164,7 @@ def classify(meeting, cfg, corroborated_by=()):
     if meeting.provider == "granola":
         them = sum(s.segments for s in meeting.speakers if s.attribution == "them")
         evidence["granola_segments_them"] = them
+        evidence["granola_segments_total"] = sum(s.segments for s in meeting.speakers)
         if them and not any(r in reasons for r in STRONG):
             reasons.append("others_spoke_unidentified")
     if meeting.provider == "fathom":

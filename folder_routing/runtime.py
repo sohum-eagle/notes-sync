@@ -49,7 +49,7 @@ def store():
 def build_pipeline(s=None, st=None, actor="worker"):
     s = s or settings()
     st = st or store()
-    fathom = granola = writer = None
+    fathom = granola = writers = None
     if s.fathom_api_key:
         from .providers.fathom import FathomReader
         fathom = FathomReader(s.fathom_api_key)
@@ -60,8 +60,17 @@ def build_pipeline(s=None, st=None, actor="worker"):
         from .providers.granola import GranolaMcpWriter
         from .providers.mcp_client import McpHttpClient
         from .providers.oauth import DbTokenProvider
-        writer = GranolaMcpWriter(McpHttpClient(s.granola_mcp_url, DbTokenProvider(st, s.token_encryption_key)))
-    return Pipeline(s, st, fathom, granola, writer, actor=actor)
+        cache = {}
+
+        def writers(owner):
+            # One MCP client per owner, each using only that owner's own login.
+            if owner not in s.granola_writer_emails:
+                return None
+            if owner not in cache:
+                cache[owner] = GranolaMcpWriter(McpHttpClient(
+                    s.granola_mcp_url, DbTokenProvider(st, s.token_encryption_key, account=owner)))
+            return cache[owner]
+    return Pipeline(s, st, fathom, granola, writers, actor=actor)
 
 
 def pipeline():

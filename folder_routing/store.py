@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS fr_review_queue (
   destination text NOT NULL,
   title text,
   link text,
+  owner_email text,
   reasons jsonb NOT NULL,
   explanation text NOT NULL DEFAULT '',
   policy_version text NOT NULL,
@@ -318,13 +319,14 @@ class Store:
         reasons = list(decision.reasons) + [r for r in extra_reasons if r not in decision.reasons]
         with self.conn() as c:
             c.execute(
-                "INSERT INTO fr_review_queue (provider, source_id, destination, title, link, reasons, explanation, "
-                "policy_version) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
+                "INSERT INTO fr_review_queue (provider, source_id, destination, title, link, owner_email, reasons, "
+                "explanation, policy_version) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON CONFLICT (provider, source_id, destination) DO UPDATE SET title=EXCLUDED.title, "
-                "link=EXCLUDED.link, reasons=EXCLUDED.reasons, explanation=EXCLUDED.explanation, "
-                "policy_version=EXCLUDED.policy_version, updated_at=now() WHERE fr_review_queue.status='open'",
+                "link=EXCLUDED.link, owner_email=EXCLUDED.owner_email, reasons=EXCLUDED.reasons, "
+                "explanation=EXCLUDED.explanation, policy_version=EXCLUDED.policy_version, updated_at=now() "
+                "WHERE fr_review_queue.status='open'",
                 (meeting.provider, meeting.source_id, destination, meeting.title[:500], meeting.link,
-                 Jsonb(reasons), decision.explanation, decision.policy_version))
+                 meeting.owner_email, Jsonb(reasons), decision.explanation, decision.policy_version))
 
     def review_failure(self, provider, source_id, destination, code, policy_version):
         """Queue a job that exhausted its retries, so it is never silently dropped."""
@@ -349,7 +351,8 @@ class Store:
     def list_review(self, status="open", limit=200):
         with self.conn() as c:
             return c.execute(
-                "SELECT id, provider, source_id, destination, title, link, reasons, explanation, policy_version, "
+                "SELECT id, provider, source_id, destination, title, link, owner_email, reasons, explanation, "
+                "policy_version, "
                 "status, created_at, updated_at FROM fr_review_queue WHERE status=%s ORDER BY created_at LIMIT %s",
                 (status, limit)).fetchall()
 

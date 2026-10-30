@@ -28,6 +28,7 @@ class SpeakerEvidence:
     display_name: str = ""
     matched_email: str = ""
     attribution: str = ""   # Granola: "me" / "them"; Fathom: ""
+    source: str = ""        # Granola: "microphone" / "speaker" (system audio); Fathom: ""
     segments: int = 0
 
 

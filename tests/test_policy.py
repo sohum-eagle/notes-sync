@@ -116,3 +116,48 @@ def test_explicit_plsa_identity_on_another_domain():
 def test_decision_is_explainable():
     d = fathom(invitees=[EAGLE, PLSA])
     assert d.explanation.startswith("REVIEW:") and "do not prove attendance" in d.explanation
+
+
+def granola(owner="sohum@eagleeng.com", invitees=("sohum@eagleeng.com", "glang@plsaengineering.com"),
+            transcript=(("me", 30), ("them", 30)), **kw):
+    return classify(granola_note_to_source(granola_note("not_V000000000001", owner=owner, invitees=list(invitees),
+                                                        transcript=transcript, **kw)), CFG)
+
+
+def test_my_granola_call_clearly_with_plsa_auto_files():
+    d = granola()
+    assert d.decision == AUTO and d.reasons == ["plsa_meeting_evident"]
+    assert d.evidence["plsa_share_of_others"] == "1/1"
+
+
+def test_plsa_half_of_other_participants_is_enough():
+    d = granola(invitees=["sohum@eagleeng.com", "mayank@eagleeng.com", "jsuiter@plsaengineering.com"])
+    assert d.decision == AUTO and d.evidence["plsa_share_of_others"] == "1/2"
+
+
+def test_plsa_minority_is_review():
+    d = granola(invitees=["sohum@eagleeng.com", "mayank@eagleeng.com", "tom@eagleeng.com",
+                          "jsuiter@plsaengineering.com"])
+    assert d.decision == REVIEW and "plsa_minority_of_participants" in d.reasons
+
+
+def test_no_conversation_captured_is_review():
+    assert "no_conversation_captured" in granola(transcript=(("me", 40),)).reasons
+    assert granola(transcript=(("me", 40), ("them", 2))).decision == REVIEW
+    assert granola(transcript=()).decision == REVIEW
+
+
+def test_in_person_capture_needs_a_longer_recording():
+    assert granola(transcript=(("me", 80),), in_person=True).decision == AUTO
+    assert granola(transcript=(("me", 30),), in_person=True).decision == REVIEW
+
+
+def test_evident_meeting_still_blocked_by_outsiders_and_sensitive_titles():
+    assert granola(invitees=["sohum@eagleeng.com", "glang@plsaengineering.com", "lina@lsvp.com"]).decision == REVIEW
+    assert granola(title="Eagle / Greg: People Org").decision == REVIEW
+
+
+def test_confirmed_personal_addresses_count_as_plsa():
+    d = granola(invitees=["sohum@eagleeng.com", "carruthers.bryan@gmail.com"])
+    assert d.decision == AUTO
+    assert "third_party_present" not in d.reasons

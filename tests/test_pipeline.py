@@ -12,11 +12,12 @@ EAGLE = "sohum@eagleeng.com"
 
 
 def build(store, writes=True, **kw):
-    kw.setdefault("granola_writer_email", PLSA_OWNER)
+    kw.setdefault("granola_writer_emails", (PLSA_OWNER,))
     s = make_settings(writes=writes, **kw)
     reader = FakeGranolaReader()
     writer = FakeWriter(reader)
-    return s, reader, writer, Pipeline(s, store, granola_reader=reader, granola_writer=writer)
+    pl = Pipeline(s, store, granola_reader=reader, granola_writers=lambda owner: writer)
+    return s, reader, writer, pl
 
 
 def qualifying(note_id="not_Q000000000001", **kw):
@@ -113,7 +114,6 @@ def test_success_is_never_reported_without_verified_membership(store):
     ({"audience": "everyone in the workspace"}, "destination_audience_changed"),
     ({"title": "PLSA (old)"}, "destination_title_changed"),
     ({"parent_folder_id": "0dcf909d-0650-4460-84c4-091ef48db5f1"}, "destination_moved"),
-    ({"role": "viewer"}, "writer_lacks_folder_role"),
 ])
 def test_folder_audience_change_halts_all_writes(store, change, reason):
     s, reader, writer, pl = build(store)
@@ -126,7 +126,7 @@ def test_folder_audience_change_halts_all_writes(store, change, reason):
     assert store.writes_halted()
     # Folder restored, but the kill switch holds until a person resumes writes.
     writer.folder = FakeWriter(reader).folder
-    pl._audience = None
+    pl._audience = {}
     assert pl.process("granola", "not_Q000000000002") == "review"
     assert "writes_halted" in review_reasons(store)["not_Q000000000002"]
     assert writer.calls == []
@@ -142,12 +142,13 @@ def test_unapproved_downstream_folder_webhook_halts(store):
     assert store.writes_halted() and writer.calls == []
     s2, _, writer2, pl2 = build(store, granola_approved_webhook_ids=("whe_x0000000000001",))
     store.resume_writes("tester")
-    pl2.granola, pl2.writer = reader, FakeWriter(reader)
+    w2 = FakeWriter(reader)
+    pl2.granola, pl2.writer_for = reader, (lambda owner: w2)
     assert pl2.process("granola", "not_Q000000000001") == "verified"
 
 
 @pytest.mark.parametrize("override,gate", [
-    ({"granola_writer_email": EAGLE}, "not_owned_by_writer"),
+    ({"granola_writer_emails": (EAGLE,)}, "owner_authorization_needed"),
     ({"granola_integrations_attestation": ""}, "folder_integrations_unattested"),
 ])
 def test_write_gates_route_to_review(store, override, gate):
@@ -166,7 +167,7 @@ def test_unpinned_folder_mapping_blocks_writes(store):
 
 
 def test_ambiguous_attendance_goes_to_review_without_writing(store):
-    s, reader, writer, pl = build(store, granola_writer_email=EAGLE)
+    s, reader, writer, pl = build(store, granola_writer_emails=(EAGLE,))
     reader.add(granola_note("not_A000000000001", owner=EAGLE, invitees=[EAGLE, PLSA_OWNER]))
     assert pl.process("granola", "not_A000000000001") == "review"
     assert {"plsa_invitee_only", "others_spoke_unidentified"} <= set(review_reasons(store)["not_A000000000001"])
@@ -203,7 +204,7 @@ def test_duplicate_recordings_are_flagged_not_double_filed(store):
 
 
 def test_fathom_speaker_evidence_corroborates_granola_note_of_same_slot(store):
-    s, reader, writer, pl = build(store, granola_writer_email=EAGLE)
+    s, reader, writer, pl = build(store, granola_writer_emails=(EAGLE,))
     invitees = [EAGLE, "jsuiter@plsaengineering.com"]
     reader.add(granola_note("not_C000000000001", owner=EAGLE, invitees=invitees, start="2026-10-21T13:00:00-04:00"))
     assert pl.process("granola", "not_C000000000001") == "review"  # no identity evidence yet
@@ -281,14 +282,54 @@ def test_writer_auth_failure_halts_writes_without_blocking_the_note(store):
     def expired(*a):
         raise TokenUnavailable("mcp_http_401")
     writer.add = expired
-    assert pl.process("granola", "not_Q000000000001") == "halted"
-    assert store.writes_halted()
+    assert pl.process("granola", "not_Q000000000001") == "owner_login_unavailable"
+    assert not store.writes_halted()  # only this owner's notes wait
     assert store.get_op("granola", "not_Q000000000001", s.granola_dest.key)["status"] == "failed_retryable"
 
 
 def test_writes_enabled_without_writer_goes_to_review(store):
     s, reader, writer, pl = build(store)
-    pl.writer = None
+    pl.writer_for = lambda owner: None
     reader.add(qualifying())
     assert pl.process("granola", "not_Q000000000001") == "review"
     assert "writer_unconfigured" in review_reasons(store)["not_Q000000000001"]
+
+
+DANNY = "danny@eagleeng.com"
+
+
+def evident_note(note_id, owner, start="2026-10-27T17:00:00Z", uuid="00000000-0000-4000-8000-0000000000aa"):
+    return granola_note(note_id, owner=owner, invitees=[owner, "slouie@plsaengineering.com"],
+                        transcript=(("me", 30), ("them", 30)), start=start, uuid=uuid)
+
+
+def test_teammate_note_is_filed_only_with_that_teammates_own_login(store):
+    s, reader, writer, pl = build(store, granola_writer_emails=(EAGLE, DANNY))
+    used = []
+    pl.writer_for = lambda owner: used.append(owner) or writer
+    reader.add(evident_note("not_T000000000001", DANNY))
+    assert pl.process("granola", "not_T000000000001") == "verified"
+    assert used == [DANNY]
+
+
+def test_teammate_without_login_goes_to_review_tagged_with_owner(store):
+    s, reader, writer, pl = build(store, granola_writer_emails=(EAGLE,))
+    reader.add(evident_note("not_T000000000002", DANNY))
+    assert pl.process("granola", "not_T000000000002") == "review"
+    item = store.list_review()[0]
+    assert item["owner_email"] == DANNY and "owner_authorization_needed" in item["reasons"]
+    assert writer.calls == []
+
+
+def test_owner_without_folder_access_does_not_halt_other_owners(store):
+    s, reader, writer, pl = build(store, granola_writer_emails=(EAGLE, DANNY))
+    viewer = FakeWriter(reader, folder=replace(writer.folder, role="viewer"))
+    pl.writer_for = lambda owner: viewer if owner == DANNY else writer
+    reader.add(evident_note("not_T000000000003", DANNY))
+    reader.add(evident_note("not_T000000000004", EAGLE, start="2026-10-28T17:00:00Z",
+                            uuid="00000000-0000-4000-8000-0000000000bb"))
+    assert pl.process("granola", "not_T000000000003") == "review"
+    assert "owner_lacks_folder_role" in review_reasons(store)["not_T000000000003"]
+    assert not store.writes_halted()
+    assert pl.process("granola", "not_T000000000004") == "verified"
+    assert viewer.calls == []

@@ -33,13 +33,14 @@ All off by default. With no flags set, the only visible changes are: `/last-webh
 | `FOLDER_ROUTING_WRITES_ENABLED` | off | Global write switch |
 | `GRANOLA_FOLDER_WRITES_ENABLED` | off | Granola write switch (both needed) |
 | `GRANOLA_PLSA_FOLDER_REST_ID` | unset | `fol_` ID, set only after `verify-granola-folder-mapping` passes |
-| `GRANOLA_WRITER_EMAIL` | unset | Only notes owned by this account are filed |
+| `GRANOLA_WRITER_EMAILS` | empty | Note owners who completed their own Granola login; each owner's notes are filed only with their login |
 | `GRANOLA_FOLDER_INTEGRATIONS_ATTESTATION` | unset | Who checked the folder's integrations, and when |
 | `GRANOLA_APPROVED_WEBHOOK_ENDPOINT_IDS` | empty | Folder-scoped Granola webhooks that are allowed |
 | `FOLDER_ROUTING_TOKEN_KEY` | unset | Fernet key for the stored MCP token |
 | `FATHOM_WEBHOOK_SECRET` | existing | Must be the `whsec_` value for routing to accept webhooks |
 | `FATHOM_API_KEY` | existing in scripts | Optional: sweep and transcript fetch |
 | `GRANOLA_API_KEY` | existing | Needs the personal scope to read the private PLSA folder |
+| `GRANOLA_MIN_SEGMENTS`, `GRANOLA_MIN_THEM_SEGMENTS`, `GRANOLA_IN_PERSON_MIN_SEGMENTS` | 20, 5, 60 | "Conversation captured" thresholds |
 | `PLSA_DOMAINS`, `PLSA_VERIFIED_EMAILS`, `INTERNAL_DOMAINS`, `INVESTOR_DOMAINS`, `FOLDER_ROUTING_SENSITIVE_TERMS`, `FOLDER_ROUTING_MIN_SPEAKER_SEGMENTS` | see `config.py` | Policy inputs |
 | `FOLDER_ROUTING_*_SWEEP_SECONDS`, `*_OVERLAP_MINUTES`, `FOLDER_ROUTING_INITIAL_LOOKBACK_MINUTES`, `FOLDER_ROUTING_MAX_ATTEMPTS`, `FOLDER_ROUTING_POLL_SECONDS` | see `config.py` | Worker tuning. First sweep looks back 60 minutes: no historical backfill |
 
@@ -51,7 +52,8 @@ All off by default. With no flags set, the only visible changes are: `/last-webh
 | `FOLDER_ROUTING_ADMIN_TOKEN`, `FOLDER_ROUTING_TOKEN_KEY` | Railway project admin | Admin endpoints, token encryption |
 | Confirm `FATHOM_WEBHOOK_SECRET` is the `whsec_` value of the existing webhook | Fathom webhook owner | Signature verification |
 | Granola API key with personal scope (confirm the existing key) | Folder owner | Read PLSA folder membership |
-| One-time Granola MCP OAuth grant as the folder owner | Folder owner, interactively | Only path to `add_note_to_folder` |
+| One-time Granola login per note owner: `cli granola-oauth-login --account <email>` | Each owner (Sohum, Danny, Mayank, Arman, Tom), interactively | Only path to `add_note_to_folder`; the login is refused if Granola reports a different account |
+| Collaborator access to the PLSA folder | Folder owner grants to each teammate | Viewers cannot add notes |
 | Check of the folder's Integrations panel | Folder owner | Downstream sharing gate |
 
 No new Fathom or Granola webhooks are registered by this change.
@@ -62,7 +64,7 @@ No new Fathom or Granola webhooks are registered by this change.
 2. Provision Postgres, set `FOLDER_ROUTING_DATABASE_URL`, `FOLDER_ROUTING_ADMIN_TOKEN`, `FOLDER_ROUTING_ENABLED=1`. Classification and review queue only.
 3. `python -m folder_routing.cli capability-check`, then `verify-granola-folder-mapping --rest-id fol_...`; pin `GRANOLA_PLSA_FOLDER_REST_ID` only on PASS.
 4. Watch the review queue for two weeks; tune `PLSA_VERIFIED_EMAILS` and terms.
-5. With approval: `granola-oauth-login`, set writer email, attestation, `FOLDER_ROUTING_TOKEN_KEY`, then both write flags. `requeue --status dry_run` replays items that qualified while writes were off.
+5. With approval: each owner runs `granola-oauth-login --account <email>`; set `GRANOLA_WRITER_EMAILS`, attestation, `FOLDER_ROUTING_TOKEN_KEY`, then both write flags. `requeue --status dry_run` replays items that qualified while writes were off.
 6. Historical backfill: not automatic. `granola_backfill.py` deliberately does not trigger routing. Run `cli dry-run --since ... --out report.md` first and get approval.
 
 Kill switch: unset `FOLDER_ROUTING_WRITES_ENABLED`, or let any audience check trip `writes_halted`; resume with `POST /admin/folder-routing/resume-writes` or `cli resume-writes --reason ...`.

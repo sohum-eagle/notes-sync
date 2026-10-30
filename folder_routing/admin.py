@@ -41,7 +41,7 @@ def status():
         "fathom_writes_supported": False,
         "granola_folder_mapping_pinned": bool(s.granola_dest.rest_folder_id),
         "granola_integrations_attested": bool(s.granola_integrations_attestation),
-        "granola_writer_configured": bool(s.granola_writer_email),
+        "granola_writer_accounts": len(s.granola_writer_emails),
     }
     if s.database_url:
         st = runtime.store()

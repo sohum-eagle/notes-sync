@@ -5,7 +5,7 @@ and `granola-oauth-login` (which stores an encrypted token). None writes to a pr
   python -m folder_routing.cli verify-granola-folder-mapping --rest-id fol_... [--expected-uuids-file f]
   python -m folder_routing.cli dry-run --since 2026-10-01T00:00:00Z --out report.md
   python -m folder_routing.cli migrate | requeue --status dry_run | resume-writes --reason ...
-  python -m folder_routing.cli granola-oauth-login
+  python -m folder_routing.cli granola-oauth-login --account owner@eagleeng.com
 """
 import argparse
 import json
@@ -24,13 +24,16 @@ def _granola(s):
     return GranolaReader(s.granola_api_key) if s.granola_api_key else None
 
 
-def _mcp_writer(s):
+def _mcp_writer(s, account=None):
     from .providers.granola import GranolaMcpWriter
     from .providers.mcp_client import McpHttpClient
     from .providers.oauth import DbTokenProvider
     from .store import Store
+    account = account or (s.granola_writer_emails[0] if s.granola_writer_emails else "")
+    if not account:
+        raise RuntimeError("set GRANOLA_WRITER_EMAILS")
     st = Store(s.database_url, s.db_schema)
-    return GranolaMcpWriter(McpHttpClient(s.granola_mcp_url, DbTokenProvider(st, s.token_encryption_key)))
+    return GranolaMcpWriter(McpHttpClient(s.granola_mcp_url, DbTokenProvider(st, s.token_encryption_key, account)))
 
 
 def capability_check(s, out=print):
@@ -65,21 +68,23 @@ def capability_check(s, out=print):
             out(f"  FAILED {e.code}")
 
     out("== Granola MCP (writes)")
-    if not (s.database_url and s.token_encryption_key):
-        out("  not configured (needs FOLDER_ROUTING_DATABASE_URL, FOLDER_ROUTING_TOKEN_KEY and a login)")
-        return
-    try:
-        folder = _mcp_writer(s).get_folder(s.granola_dest.folder_id)
-    except Exception as e:
-        out(f"  FAILED {type(e).__name__}: {getattr(e, 'code', '')}")
-        return
-    if not folder:
-        out("  destination folder not visible to this account")
+    if not (s.database_url and s.token_encryption_key and s.granola_writer_emails):
+        out("  not configured (needs FOLDER_ROUTING_DATABASE_URL, FOLDER_ROUTING_TOKEN_KEY, GRANOLA_WRITER_EMAILS, logins)")
         return
     d = s.granola_dest
-    out(f"  folder: title={folder.title!r} visibility={folder.visibility} audience={folder.audience!r} role={folder.role}")
-    ok = (folder.title, folder.visibility, folder.audience) == (d.expected_title, d.approved_visibility, d.approved_audience)
-    out(f"  matches approved audience config: {'YES' if ok else 'NO -> writes would halt'}")
+    for account in s.granola_writer_emails:
+        try:
+            folder = _mcp_writer(s, account).get_folder(d.folder_id)
+        except Exception as e:
+            out(f"  {account}: FAILED {type(e).__name__} {getattr(e, 'code', '')}")
+            continue
+        if not folder:
+            out(f"  {account}: destination folder not visible")
+            continue
+        ok = (folder.title, folder.visibility, folder.audience) == (d.expected_title, d.approved_visibility,
+                                                                     d.approved_audience)
+        out(f"  {account}: visibility={folder.visibility} audience={folder.audience!r} role={folder.role} "
+            f"matches approved config: {'YES' if ok else 'NO -> writes would halt'}")
 
 
 def verify_mapping(s, rest_id, expected_file=None, out=print):
@@ -159,6 +164,7 @@ def main(argv=None):
     w = sub.add_parser("resume-writes")
     w.add_argument("--reason", required=True)
     o = sub.add_parser("granola-oauth-login")
+    o.add_argument("--account", required=True, help="the note owner signing in, e.g. danny@eagleeng.com")
     o.add_argument("--port", type=int, default=8765)
     o.add_argument("--scope")
     args = p.parse_args(argv)
@@ -181,7 +187,7 @@ def main(argv=None):
             st.resume_writes("cli", args.reason)
         elif args.cmd == "granola-oauth-login":
             from .providers.oauth import interactive_login
-            interactive_login(st, s.token_encryption_key, port=args.port, scope=args.scope)
+            interactive_login(st, s.token_encryption_key, args.account, port=args.port, scope=args.scope)
     return 0
 
 

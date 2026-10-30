@@ -7,6 +7,9 @@ from dataclasses import dataclass, field
 GRANOLA_PLSA_FOLDER_UUID = "bae7dffb-3fd1-4de6-9a36-9a3fca2911bd"
 FATHOM_PLSA_FOLDER_ID = "ZQa3o3WK22ysoSGPjDsP2y9dVaLmXcqTc1ab"
 
+# Confirmed by the user on 2026-10-30 as PLSA-associated people using personal addresses.
+DEFAULT_PLSA_ASSOCIATED_EMAILS = ("carruthers.bryan@gmail.com", "triciaesser@gmail.com", "zack.sikora6@gmail.com")
+
 DEFAULT_SENSITIVE_TERMS = (
     "confidential", "privileged", "compensation", "comp", "bonus", "equity", "salary", "severance", "termination",
     "performance review", "offer letter", "legal", "lawsuit", "litigation", "board",
@@ -38,12 +41,15 @@ def _int(env, name, default):
 @dataclass(frozen=True)
 class PolicyConfig:
     plsa_domains: tuple = ("plsaengineering.com",)
-    plsa_emails: tuple = ()
+    plsa_emails: tuple = DEFAULT_PLSA_ASSOCIATED_EMAILS
     internal_domains: tuple = ("eagleeng.com",)
     investor_domains: tuple = ("lsvp.com", "opslsvp.com")
     ignorable_domains: tuple = ("resource.calendar.google.com", "group.calendar.google.com")
     sensitive_terms: tuple = DEFAULT_SENSITIVE_TERMS
     min_speaker_segments: int = 2
+    granola_min_segments: int = 20           # remote call: total transcript segments
+    granola_min_them_segments: int = 5       # remote call: segments from other people's audio
+    granola_in_person_min_segments: int = 60 # no system audio at all: longer capture required
 
 
 @dataclass(frozen=True)
@@ -70,7 +76,7 @@ class Settings:
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     granola_dest: Destination = None
     fathom_dest: Destination = None
-    granola_writer_email: str = ""
+    granola_writer_emails: tuple = ()  # note owners who granted their own Granola login
     granola_integrations_attestation: str = ""
     granola_approved_webhook_ids: tuple = ()
     fathom_webhook_secret: str = ""
@@ -100,11 +106,14 @@ def load_settings(env=None):
     fathom_folder = env.get("FATHOM_PLSA_FOLDER_ID", FATHOM_PLSA_FOLDER_ID)
     policy = PolicyConfig(
         plsa_domains=_list(env, "PLSA_DOMAINS", ("plsaengineering.com",)),
-        plsa_emails=_list(env, "PLSA_VERIFIED_EMAILS"),
+        plsa_emails=_list(env, "PLSA_VERIFIED_EMAILS", DEFAULT_PLSA_ASSOCIATED_EMAILS),
         internal_domains=_list(env, "INTERNAL_DOMAINS", (env.get("MY_DOMAIN", "eagleeng.com").lower(),)),
         investor_domains=_list(env, "INVESTOR_DOMAINS", ("lsvp.com", "opslsvp.com")),
         sensitive_terms=_list(env, "FOLDER_ROUTING_SENSITIVE_TERMS", DEFAULT_SENSITIVE_TERMS),
         min_speaker_segments=_int(env, "FOLDER_ROUTING_MIN_SPEAKER_SEGMENTS", 2),
+        granola_min_segments=_int(env, "GRANOLA_MIN_SEGMENTS", 20),
+        granola_min_them_segments=_int(env, "GRANOLA_MIN_THEM_SEGMENTS", 5),
+        granola_in_person_min_segments=_int(env, "GRANOLA_IN_PERSON_MIN_SEGMENTS", 60),
     )
     return Settings(
         enabled=_bool(env, "FOLDER_ROUTING_ENABLED"),
@@ -131,7 +140,7 @@ def load_settings(env=None):
             folder_id=fathom_folder,
             folder_url=f"https://fathom.video/folders/{fathom_folder}",
         ),
-        granola_writer_email=env.get("GRANOLA_WRITER_EMAIL", "").strip().lower(),
+        granola_writer_emails=_list(env, "GRANOLA_WRITER_EMAILS", _list(env, "GRANOLA_WRITER_EMAIL")),
         granola_integrations_attestation=env.get("GRANOLA_FOLDER_INTEGRATIONS_ATTESTATION", "").strip(),
         granola_approved_webhook_ids=_list(env, "GRANOLA_APPROVED_WEBHOOK_ENDPOINT_IDS"),
         fathom_webhook_secret=env.get("FATHOM_WEBHOOK_SECRET", ""),

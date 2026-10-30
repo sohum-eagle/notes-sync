@@ -67,9 +67,9 @@ def granola_speakers(transcript):
     counts = OrderedDict()
     for item in transcript or []:
         speaker = (item or {}).get("speaker") or {}
-        attribution = str(speaker.get("attribution") or "unknown")
-        counts[attribution] = counts.get(attribution, 0) + 1
-    return [SpeakerEvidence(attribution=a, segments=c) for a, c in counts.items()]
+        key = (str(speaker.get("attribution") or "unknown"), str(speaker.get("source") or "unknown"))
+        counts[key] = counts.get(key, 0) + 1
+    return [SpeakerEvidence(attribution=a, source=src, segments=c) for (a, src), c in counts.items()]
 
 
 def granola_uuid_from_web_url(web_url):

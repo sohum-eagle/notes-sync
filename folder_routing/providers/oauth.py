@@ -3,8 +3,9 @@
 Granola documents browser OAuth with dynamic client registration for MCP. Its
 authorization-server metadata also advertises refresh_token and offline_access,
 but Granola does not document unattended server use. This module therefore:
-  * runs the documented browser flow once, interactively, via the CLI
-  * stores tokens only as Fernet ciphertext in Postgres
+  * runs the documented browser flow once per note owner, interactively, via the CLI
+  * refuses to save a token unless Granola reports the named account
+  * stores tokens only as Fernet ciphertext in Postgres, one row per account
   * refreshes under a row lock so a rotating refresh token is used exactly once
 If refresh is refused, writes stop until someone logs in again.
 """
@@ -35,8 +36,13 @@ def _fernet(key):
     return Fernet(key.encode() if isinstance(key, str) else key)
 
 
+def token_key(account):
+    return f"{PROVIDER}:{account.strip().lower()}"
+
+
 class DbTokenProvider:
-    def __init__(self, store, encryption_key, client=None, clock=time.time):
+    def __init__(self, store, encryption_key, account, client=None, clock=time.time):
+        self.key = token_key(account)
         self.store = store
         self.fernet = _fernet(encryption_key)
         self.client = client or httpx.Client(timeout=30)
@@ -55,7 +61,7 @@ class DbTokenProvider:
 
     def access_token(self):
         if self.cached is None:
-            ciphertext = self.store.load_token(PROVIDER)
+            ciphertext = self.store.load_token(self.key)
             if not ciphertext:
                 raise TokenUnavailable("not_logged_in")
             self.cached = self._decrypt(ciphertext)
@@ -65,7 +71,7 @@ class DbTokenProvider:
 
     def refresh(self):
         with self.store.conn() as c:
-            ciphertext = self.store.load_token(PROVIDER, for_update_conn=c)
+            ciphertext = self.store.load_token(self.key, for_update_conn=c)
             if not ciphertext:
                 raise TokenUnavailable("not_logged_in")
             tok = self._decrypt(ciphertext)
@@ -84,12 +90,31 @@ class DbTokenProvider:
             tok.update(access_token=body["access_token"],
                        refresh_token=body.get("refresh_token") or tok["refresh_token"],
                        expires_at=self.clock() + int(body.get("expires_in", 3600)))
-            self.store.save_token(PROVIDER, self._encrypt(tok), conn=c)
+            self.store.save_token(self.key, self._encrypt(tok), conn=c)
         self.cached = tok
 
 
-def interactive_login(store, encryption_key, port=8765, scope=None, client=None, out=print):
-    """One-time browser OAuth (authorization code + PKCE, loopback redirect). Run by a person."""
+class _StaticToken:
+    def __init__(self, token):
+        self.token = token
+
+    def access_token(self):
+        return self.token
+
+    def refresh(self):
+        raise TokenUnavailable("login_token_rejected")
+
+
+def confirm_account(resource, access_token, account, client=None):
+    """Ask Granola which account the new token belongs to; raise unless it is `account`."""
+    from .mcp_client import McpHttpClient, tool_payload
+    info = tool_payload(McpHttpClient(resource, _StaticToken(access_token), client).call_tool("get_account_info", {}))
+    if str(info.get("email") or "").strip().lower() != account.strip().lower():
+        raise TokenUnavailable("account_mismatch")
+
+
+def interactive_login(store, encryption_key, account, port=8765, scope=None, client=None, out=print):
+    """One-time browser OAuth (authorization code + PKCE, loopback redirect), run by the note owner."""
     client = client or httpx.Client(timeout=30)
     fernet = _fernet(encryption_key)
     prm = client.get(RESOURCE_METADATA).json()
@@ -111,7 +136,7 @@ def interactive_login(store, encryption_key, port=8765, scope=None, client=None,
         "response_type": "code", "client_id": reg["client_id"], "redirect_uri": redirect,
         "code_challenge": challenge, "code_challenge_method": "S256", "state": state,
         "scope": scope, "resource": prm["resource"]})
-    out(f"Open this URL in a browser and sign in as the Granola account that owns the folder:\n{url}")
+    out(f"Open this URL in a browser and sign in to Granola as {account}:\n{url}")
     code = _wait_for_code(port, state)
     body = client.post(asm["token_endpoint"], data={
         "grant_type": "authorization_code", "code": code, "redirect_uri": redirect,
@@ -119,10 +144,11 @@ def interactive_login(store, encryption_key, port=8765, scope=None, client=None,
     if body.status_code >= 400:
         raise TokenUnavailable(f"token_http_{body.status_code}")
     body = body.json()
+    confirm_account(prm["resource"], body["access_token"], account, client)
     tok = {"access_token": body["access_token"], "refresh_token": body.get("refresh_token", ""),
            "expires_at": time.time() + int(body.get("expires_in", 3600)), "client_id": reg["client_id"],
            "token_endpoint": asm["token_endpoint"], "resource": prm["resource"]}
-    store.save_token(PROVIDER, fernet.encrypt(json.dumps(tok).encode()).decode())
+    store.save_token(token_key(account), fernet.encrypt(json.dumps(tok).encode()).decode())
     out(f"Saved encrypted token. Refresh token issued: {'yes' if tok['refresh_token'] else 'NO (writes will stop when it expires)'}")
 
 
