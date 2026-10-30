@@ -133,7 +133,7 @@ def webhook():
     # Runs before, and independent of, the Attio filters below. Never raises.
     if folder_routing_hooks:
         folder_routing_hooks.on_fathom_webhook(request.headers, raw_body, payload)
-    print(f"WEBHOOK HIT:title={payload.get('meeting_title')} sig_header={request.headers.get('x-fathom-signature','NONE')}", flush=True)
+    print(f"WEBHOOK HIT: title={payload.get('meeting_title')} sig_header={request.headers.get('x-fathom-signature','NONE')}", flush=True)
 
     if WEBHOOK_SECRET:
         sig = request.headers.get("x-fathom-signature", "")
